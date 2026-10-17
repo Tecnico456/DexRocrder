@@ -1,0 +1,6 @@
+{
+  "name": "DexRecorder",
+  "description": "Gravador de tela avançado com suporte a áudio interno e microfone misto, Samsung DeX, facecam, pincel e editor.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
