@@ -16,6 +16,8 @@ import com.example.model.RecordedVideo
 import com.example.model.RecordingSettings
 import com.example.model.RecordingStatus
 import com.example.model.ResolutionOption
+import com.example.model.ScreenCaptureMode
+import com.example.model.SettingsPreferences
 import com.example.service.FloatingOverlayService
 import com.example.service.ScreenRecordingService
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,7 +39,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val recordingStatus: StateFlow<RecordingStatus> = ScreenRecordingService.recordingStatus
 
-    private val _settings = MutableStateFlow(ScreenRecordingService.currentSettings)
+    private val _settings = MutableStateFlow(
+        SettingsPreferences.load(application).also {
+            ScreenRecordingService.currentSettings = it
+        }
+    )
     val settings: StateFlow<RecordingSettings> = _settings.asStateFlow()
 
     private val _selectedVideoForEdit = MutableStateFlow<RecordedVideo?>(null)
@@ -50,6 +56,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val newSettings = transform(_settings.value)
         _settings.value = newSettings
         ScreenRecordingService.currentSettings = newSettings
+        // TAREFA 4: Salva automaticamente (apply()) qualquer alteração feita pelo usuário no SharedPreferences
+        SettingsPreferences.save(getApplication(), newSettings)
+    }
+
+    fun setCaptureMode(mode: ScreenCaptureMode) {
+        updateSettings { it.copy(captureMode = mode) }
     }
 
     fun setAudioMode(mode: AudioCaptureMode) {

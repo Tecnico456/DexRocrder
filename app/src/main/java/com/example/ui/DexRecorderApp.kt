@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.model.AudioCaptureMode
 import com.example.model.RecordingStatus
+import com.example.model.createConfiguredScreenCaptureIntent
 import com.example.service.ScreenRecordingService
 import com.example.ui.screens.RecordDashboardScreen
 import com.example.ui.screens.SettingsScreen
@@ -106,10 +107,10 @@ fun DexRecorderApp(
     // Permission launchers
     val permissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { grants ->
-        // Start screen capture flow after permissions checked
+    ) { _ ->
+        // Start screen capture flow after permissions checked using Android 14+ MediaProjectionConfig
         val projectionManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
+        screenCaptureLauncher.launch(createConfiguredScreenCaptureIntent(projectionManager, settings.captureMode))
     }
 
     val requestPermissionsAndStart = {
@@ -128,7 +129,7 @@ fun DexRecorderApp(
             permissionsLauncher.launch(permissionsToRequest.toTypedArray())
         } else {
             val projectionManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
+            screenCaptureLauncher.launch(createConfiguredScreenCaptureIntent(projectionManager, settings.captureMode))
         }
     }
 

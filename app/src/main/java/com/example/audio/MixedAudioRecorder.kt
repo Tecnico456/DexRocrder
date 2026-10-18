@@ -72,6 +72,8 @@ class MixedAudioRecorder(
                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
                 .addMatchingUsage(AudioAttributes.USAGE_GAME)
                 .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .addMatchingUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                .addMatchingUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
                 .build()
 
             val format = AudioFormat.Builder()

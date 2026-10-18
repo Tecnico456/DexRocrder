@@ -18,16 +18,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AppShortcut
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
@@ -53,7 +56,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,12 +73,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.model.AudioCaptureMode
 import com.example.model.FpsOption
 import com.example.model.RecordingSettings
 import com.example.model.RecordingStatus
 import com.example.model.ResolutionOption
+import com.example.model.ScreenCaptureMode
 import com.example.service.FloatingOverlayService
 import com.example.service.ScreenRecordingService
 import com.example.ui.theme.CyanAccent
@@ -91,6 +103,16 @@ fun RecordDashboardScreen(
     val status by viewModel.recordingStatus.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
+    // TAREFA 3: Ao iniciar a tela principal, verifica se a Bola Flutuante está ativa e se a permissão já foi concedida
+    LaunchedEffect(settings.showFloatingBall) {
+        if (settings.showFloatingBall && Settings.canDrawOverlays(context)) {
+            val intent = Intent(context, FloatingOverlayService::class.java).apply {
+                action = FloatingOverlayService.ACTION_SHOW_BALL
+            }
+            context.startService(intent)
+        }
+    }
+
     Column(
         modifier = modifier
             .verticalScroll(rememberScrollState())
@@ -110,13 +132,19 @@ fun RecordDashboardScreen(
             onStopClick = { viewModel.stopRecording(context) }
         )
 
+        // TAREFA 1: Seletor de Modo de Captura ("Tela cheia" no topo e padrão, "Um único aplicativo" logo abaixo)
+        CaptureModeSelectorCard(
+            selectedCaptureMode = settings.captureMode,
+            onSelectCaptureMode = { viewModel.setCaptureMode(it) }
+        )
+
         // Audio Source Selection (Critical Req 1)
         AudioCaptureModeCard(
             selectedMode = settings.audioMode,
             onSelectMode = { viewModel.setAudioMode(it) }
         )
 
-        // Video Quality Presets
+        // Video Quality Presets (TAREFA 2: 720p, 1080p, 4K, Nativo e FPS crescente)
         VideoQualitySelectorCard(
             settings = settings,
             onResolutionChange = { viewModel.setResolution(it) },
@@ -389,6 +417,99 @@ private fun HeroRecordingStatusCard(
 }
 
 @Composable
+private fun CaptureModeSelectorCard(
+    selectedCaptureMode: ScreenCaptureMode,
+    onSelectCaptureMode: (ScreenCaptureMode) -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Fullscreen, contentDescription = null, tint = CyanAccent)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Modo de Captura da Tela",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Escolha entre gravar a tela inteira (padrão) ou apenas uma janela específica.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // TAREFA 1: "Tela cheia" em primeiro lugar (no topo da lista e selecionada por padrão),
+            // e "Um único aplicativo" logo abaixo dela.
+            listOf(
+                ScreenCaptureMode.FULL_SCREEN,
+                ScreenCaptureMode.SINGLE_APP
+            ).forEach { mode ->
+                val isSelected = mode == selectedCaptureMode
+                val tag = if (mode == ScreenCaptureMode.FULL_SCREEN) {
+                    "capture_mode_full_screen"
+                } else {
+                    "capture_mode_single_app"
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                            else Color.Transparent
+                        )
+                        .border(
+                            1.dp,
+                            if (isSelected) RedPrimary else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                            RoundedCornerShape(10.dp)
+                        )
+                        .clickable { onSelectCaptureMode(mode) }
+                        .padding(12.dp)
+                        .testTag(tag),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val icon = when (mode) {
+                        ScreenCaptureMode.FULL_SCREEN -> Icons.Default.Fullscreen
+                        ScreenCaptureMode.SINGLE_APP -> Icons.Default.AppShortcut
+                    }
+
+                    Icon(
+                        icon,
+                        contentDescription = null,
+                        tint = if (isSelected) RedPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = mode.title,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = mode.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (isSelected) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = RedPrimary)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun AudioCaptureModeCard(
     selectedMode: AudioCaptureMode,
     onSelectMode: (AudioCaptureMode) -> Unit
@@ -491,22 +612,25 @@ private fun VideoQualitySelectorCard(
             )
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Resolutions chips
+            // TAREFA 2: Ordem estritamente crescente de Resoluções: 720p, 1080p, 2K, 4K, Nativo
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 listOf(
-                    ResolutionOption.RES_1080P,
-                    ResolutionOption.RES_4K,
                     ResolutionOption.RES_720P,
+                    ResolutionOption.RES_1080P,
+                    ResolutionOption.RES_2K,
+                    ResolutionOption.RES_4K,
                     ResolutionOption.NATIVE
                 ).forEach { res ->
                     val isSelected = res == settings.resolution
                     FilterChip(
                         selected = isSelected,
                         onClick = { onResolutionChange(res) },
-                        label = { Text(res.label.substringBefore(" ")) },
+                        label = { Text(res.shortLabel) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = RedPrimary,
                             selectedLabelColor = Color.White
@@ -517,12 +641,19 @@ private fun VideoQualitySelectorCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // FPS chips
+            // TAREFA 3: Taxa de Quadros (FPS) ordenada estritamente: 30 FPS, 60 FPS, 90 FPS, 120 FPS
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                FpsOption.values().forEach { fps ->
+                listOf(
+                    FpsOption.FPS_30,
+                    FpsOption.FPS_60,
+                    FpsOption.FPS_90,
+                    FpsOption.FPS_120
+                ).forEach { fps ->
                     val isSelected = fps == settings.fps
                     FilterChip(
                         selected = isSelected,
@@ -546,7 +677,28 @@ private fun FloatingToolsCard(
     onToggleBall: (Boolean) -> Unit,
     onOpacityChange: (Float) -> Unit
 ) {
-    val hasOverlayPermission = Settings.canDrawOverlays(context)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+
+    // TAREFA 3: Observa retorno da tela de permissões (ON_RESUME) e inicia a Bola Flutuante imediatamente se ativa
+    DisposableEffect(lifecycleOwner, settings.showFloatingBall) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val granted = Settings.canDrawOverlays(context)
+                hasOverlayPermission = granted
+                if (settings.showFloatingBall && granted) {
+                    val intent = Intent(context, FloatingOverlayService::class.java).apply {
+                        action = FloatingOverlayService.ACTION_SHOW_BALL
+                    }
+                    context.startService(intent)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     Card(
         shape = RoundedCornerShape(16.dp),
@@ -572,18 +724,20 @@ private fun FloatingToolsCard(
                     )
                 }
                 Switch(
-                    checked = settings.showFloatingBall && hasOverlayPermission,
+                    checked = settings.showFloatingBall,
                     onCheckedChange = { enable ->
-                        if (enable && !hasOverlayPermission) {
+                        onToggleBall(enable)
+                        if (enable && !Settings.canDrawOverlays(context)) {
                             val intent = Intent(
                                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                                 Uri.parse("package:${context.packageName}")
-                            )
+                            ).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
                             context.startActivity(intent)
-                        } else {
-                            onToggleBall(enable)
                         }
                     },
+                    modifier = Modifier.testTag("floating_ball_switch"),
                     colors = SwitchDefaults.colors(checkedThumbColor = RedPrimary, checkedTrackColor = RedDark)
                 )
             }

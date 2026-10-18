@@ -38,6 +38,7 @@ import com.example.model.RecordedVideo
 import com.example.model.RecordingSettings
 import com.example.model.RecordingStatus
 import com.example.model.ResolutionOption
+import com.example.model.SettingsPreferences
 import com.example.storage.MediaStoreHelper
 import com.example.video.MediaMuxerManager
 import com.example.video.ScreenVideoEncoder
@@ -138,6 +139,7 @@ class ScreenRecordingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        currentSettings = SettingsPreferences.load(this)
         createNotificationChannel()
 
         val filter = IntentFilter().apply {
@@ -158,6 +160,7 @@ class ScreenRecordingService : Service() {
 
         when (action) {
             ACTION_START -> {
+                currentSettings = SettingsPreferences.load(this)
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
                 val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
@@ -340,7 +343,7 @@ class ScreenRecordingService : Service() {
                 val expectedTracks = if (currentSettings.audioMode == AudioCaptureMode.MUTE) 1 else 2
                 muxerManager = MediaMuxerManager(outputFd = output.pfd.fileDescriptor, expectedTrackCount = expectedTracks)
 
-                // Initialize Video Encoder
+                // Initialize Video Encoder (with KEY_PRIORITY, KEY_OPERATING_RATE, dynamic bitrate, and VideoCapabilities fallback)
                 val videoEnc = ScreenVideoEncoder(
                     mediaProjection = projection,
                     width = videoWidth,
@@ -352,12 +355,15 @@ class ScreenRecordingService : Service() {
                     muxerManager = muxerManager!!
                 )
                 videoEnc.prepare()
+                videoWidth = videoEnc.actualWidth
+                videoHeight = videoEnc.actualHeight
                 videoEnc.startEncoding(serviceScope)
                 videoEncoder = videoEnc
 
-                // TAREFA 1, 2 e 3: Inicializa o pipeline unificado de áudio (48.000 Hz, Estéreo, AAC LC síncrono com AudioPlaybackCapture)
+                // TAREFA 1, 2 e 3: Inicializa o pipeline unificado de áudio (48.000 Hz, Estéreo, AAC LC síncrono com AudioPlaybackCapture, Mixer ShortArray e Detector de Bloqueio DRM)
                 if (currentSettings.audioMode != AudioCaptureMode.MUTE) {
                     val audioPipe = AudioCaptureAndEncoder(
+                        context = this@ScreenRecordingService,
                         mediaProjection = projection,
                         audioMode = currentSettings.audioMode,
                         muxerManager = muxerManager!!,
@@ -382,20 +388,16 @@ class ScreenRecordingService : Service() {
     }
 
     /**
-     * OTIMIZAÇÃO PARA O MODO SAMSUNG DEX E ORIENTAÇÃO DINÂMICA
+     * OTIMIZAÇÃO PARA O MODO SAMSUNG DEX E ORIENTAÇÃO DINÂMICA (720p, 1080p, 2K 1440p, 4K e Nativo)
      *
-     * TAREFA 1: Detecção Automática do Modo Samsung DeX e Monitor Externo
      * - Se isDeXMode(this) for verdadeiro, busca o monitor do DeX no DisplayManager (displayId != DEFAULT_DISPLAY).
-     * - Caso contrário, usa o display padrão (DEFAULT_DISPLAY).
-     *
-     * TAREFA 2: Configurar Resolução e DPI Exatos do Monitor
-     * - Obtém a resolução real e DPI via targetDisplay.getRealMetrics(metrics).
      * - No modo DeX:
-     *   - Garante formato Paisagem Widescreen (16:9) invertendo largura e altura se videoWidth < videoHeight.
+     *   - Garante formato Paisagem Widescreen (16:9) invertendo largura e altura se rawWidth < rawHeight.
      *   - Se o DPI do monitor for reportado incorretamente como alto (> 320), define o padrão desktop mdpi (160).
-     *   - Alimenta o MediaFormat com a resolução e DPI exatos do monitor do DeX.
+     *   - Se a resolução for NATIVE, utiliza a resolução exata do monitor externo DeX; caso contrário, aplica a
+     *     resolução selecionada (720p, 1080p, 2K 2560x1440, 4K 3840x2160) em Paisagem.
      * - No modo convencional (celular):
-     *   - Respeita a orientação e rotação do dispositivo para jogos em tela cheia.
+     *   - Respeita a orientação (Paisagem: 2560x1440 em 2K / Retrato: 1440x2560 em 2K, múltiplos de 16).
      */
     private fun calculateScreenDimensions() {
         val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -426,11 +428,25 @@ class ScreenRecordingService : Service() {
             }
             // Se o DPI do monitor for reportado incorretamente como alto, defina o padrão desktop mdpi (160)
             if (densityDpi > 320) densityDpi = 160
-
-            // Garante dimensões pares requeridas pelo MediaCodec
-            videoWidth = if (rawWidth % 2 == 0) rawWidth else rawWidth - 1
-            videoHeight = if (rawHeight % 2 == 0) rawHeight else rawHeight - 1
             screenDpi = densityDpi
+
+            if (currentSettings.resolution == ResolutionOption.NATIVE) {
+                videoWidth = if (rawWidth % 2 == 0) rawWidth else rawWidth - 1
+                videoHeight = if (rawHeight % 2 == 0) rawHeight else rawHeight - 1
+            } else {
+                val maxTarget = maxOf(currentSettings.resolution.width, currentSettings.resolution.height)
+                val minTarget = minOf(currentSettings.resolution.width, currentSettings.resolution.height)
+                videoWidth = if (currentSettings.resolution == ResolutionOption.RES_2K) {
+                    ScreenVideoEncoder.alignTo16(maxTarget)
+                } else {
+                    if (maxTarget % 2 == 0) maxTarget else maxTarget - 1
+                }
+                videoHeight = if (currentSettings.resolution == ResolutionOption.RES_2K) {
+                    ScreenVideoEncoder.alignTo16(minTarget)
+                } else {
+                    if (minTarget % 2 == 0) minTarget else minTarget - 1
+                }
+            }
 
             Log.i(tag, "Modo DeX ativo: Monitor Externo configurado para ${videoWidth}x${videoHeight} @ ${screenDpi} DPI (Display ID: ${targetDisplay.displayId})")
         } else {
@@ -452,15 +468,21 @@ class ScreenRecordingService : Service() {
                 val minTarget = minOf(targetDimension1, targetDimension2)
 
                 val (outW, outH) = if (isLandscape) {
-                    // Modo Paisagem: Largura maior, Altura menor
+                    // Modo Paisagem: Largura maior (ex: 2560 em 2K), Altura menor (ex: 1440 em 2K)
                     Pair(maxTarget, minTarget)
                 } else {
-                    // Modo Retrato: Largura menor, Altura maior
+                    // Modo Retrato: Largura menor (ex: 1440 em 2K), Altura maior (ex: 2560 em 2K)
                     Pair(minTarget, maxTarget)
                 }
 
-                videoWidth = if (outW % 2 == 0) outW else outW - 1
-                videoHeight = if (outH % 2 == 0) outH else outH - 1
+                if (currentSettings.resolution == ResolutionOption.RES_2K) {
+                    // TAREFA 2: Garante múltiplos de 16 para 2K (2560x1440 / 1440x2560)
+                    videoWidth = ScreenVideoEncoder.alignTo16(outW)
+                    videoHeight = ScreenVideoEncoder.alignTo16(outH)
+                } else {
+                    videoWidth = if (outW % 2 == 0) outW else outW - 1
+                    videoHeight = if (outH % 2 == 0) outH else outH - 1
+                }
             }
 
             Log.d(tag, "Modo Celular ativo: ${videoWidth}x${videoHeight} @ ${screenDpi} DPI (Rotação=$rotation, Paisagem=$isLandscape)")

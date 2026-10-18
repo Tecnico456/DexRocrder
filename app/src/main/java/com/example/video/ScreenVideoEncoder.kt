@@ -31,9 +31,63 @@ class ScreenVideoEncoder(
 ) {
     companion object {
         private const val TAG = "ScreenVideoEncoder"
+
+        /**
+         * Garante que a dimensão seja múltiplo de 16 (requisito de alinhamento de macroblocos H.264/HEVC para 2K/QHD).
+         */
+        fun alignTo16(dimension: Int): Int {
+            val aligned = (dimension / 16) * 16
+            return if (aligned >= 16) aligned else 16
+        }
+
+        /**
+         * TAREFA 3: Cálculo Dinâmico de Bitrate proporcional à resolução e ao FPS.
+         * Para 2K (2560x1440), 4K (3840x2160) ou altas taxas de quadros (90/120 FPS),
+         * escala o bitrate na faixa de 16 Mbps a 40 Mbps.
+         */
+        fun calculateDynamicBitrate(
+            width: Int,
+            height: Int,
+            fps: Int,
+            baseBitrateBps: Int = 12_000_000
+        ): Int {
+            val pixels = width.toLong() * height.toLong()
+            val refPixels1080p = 1920L * 1080L // 2.073.600 pixels
+            val is2KOrHigher = pixels >= (2560L * 1440L)
+            val is4K = pixels >= (3840L * 2160L)
+            val isHighFps = fps >= 90
+
+            val pixelFactor = (pixels.toDouble() / refPixels1080p.toDouble()).coerceAtLeast(0.45)
+            val fpsFactor = (fps.toDouble() / 60.0).coerceAtLeast(0.6)
+            val scaledBitrate = (baseBitrateBps * pixelFactor * fpsFactor).toInt()
+
+            return if (is2KOrHigher || isHighFps) {
+                val minRecommended = when {
+                    is4K && fps >= 90 -> 36_000_000
+                    is4K -> 28_000_000
+                    is2KOrHigher && fps >= 120 -> 28_000_000
+                    is2KOrHigher && fps >= 90 -> 24_000_000
+                    is2KOrHigher -> 20_000_000
+                    fps >= 120 -> 20_000_000
+                    else -> 16_000_000 // 90 FPS em 720p/1080p
+                }
+                maxOf(scaledBitrate, minRecommended).coerceIn(16_000_000, 40_000_000)
+            } else {
+                scaledBitrate.coerceIn(4_000_000, 40_000_000)
+            }
+        }
     }
 
     private val mimeType = if (useHevc) "video/hevc" else "video/avc"
+
+    var actualWidth: Int = width
+        private set
+    var actualHeight: Int = height
+        private set
+    var actualFps: Int = fps
+        private set
+    var actualBitrate: Int = bitrate
+        private set
 
     private var mediaCodec: MediaCodec? = null
     private var inputSurface: Surface? = null
@@ -51,39 +105,136 @@ class ScreenVideoEncoder(
     private var lastVideoPtsUs: Long = -1L
 
     fun prepare() {
-        val format = MediaFormat.createVideoFormat(mimeType, width, height).apply {
+        val videoCodec = MediaCodec.createEncoderByType(mimeType)
+        val codecInfo = videoCodec.codecInfo
+        val videoCapabilities = try {
+            codecInfo.getCapabilitiesForType(mimeType)?.videoCapabilities
+        } catch (e: Exception) {
+            Log.w(TAG, "Não foi possível consultar VideoCapabilities para $mimeType", e)
+            null
+        }
+
+        var targetWidth = if (width % 2 == 0) width else width - 1
+        var targetHeight = if (height % 2 == 0) height else height - 1
+        var selectedFps = fps
+
+        // TAREFA 3: Validação de Suporte de Hardware (VideoCapabilities) antes de videoCodec.configure()
+        if (videoCapabilities != null) {
+            // Se a resolução não for suportada diretamente, tenta alinhar para múltiplos de 16 ou limitar ao range do hardware
+            if (!videoCapabilities.isSizeSupported(targetWidth, targetHeight)) {
+                val alignedW = alignTo16(targetWidth).coerceIn(
+                    videoCapabilities.supportedWidths.lower,
+                    videoCapabilities.supportedWidths.upper
+                )
+                val alignedH = alignTo16(targetHeight).coerceIn(
+                    videoCapabilities.supportedHeights.lower,
+                    videoCapabilities.supportedHeights.upper
+                )
+                if (videoCapabilities.isSizeSupported(alignedW, alignedH)) {
+                    targetWidth = alignedW
+                    targetHeight = alignedH
+                } else {
+                    // Fallback seguro para 1080p na orientação correspondente
+                    val isLandscape = targetWidth >= targetHeight
+                    targetWidth = if (isLandscape) 1920 else 1080
+                    targetHeight = if (isLandscape) 1080 else 1920
+                }
+                Log.w(TAG, "Resolução ajustada para compatibilidade com o hardware: ${targetWidth}x${targetHeight}")
+            }
+
+            // Verifica se o encoder suporta a combinação escolhida (ex: 4K @ 120 FPS ou 2K @ 120 FPS)
+            if (!videoCapabilities.areSizeAndRateSupported(targetWidth, targetHeight, selectedFps.toDouble())) {
+                val maxSupportedRate = try {
+                    videoCapabilities.getSupportedFrameRatesFor(targetWidth, targetHeight).upper.toInt()
+                } catch (e: Exception) {
+                    60
+                }
+
+                // Tenta reduzir para o maior FPS suportado (90 -> 60 -> 30)
+                val fallbackCandidates = listOf(90, 60, 30).filter { it <= maxSupportedRate }
+                val supportedCandidate = fallbackCandidates.firstOrNull { candidateFps ->
+                    videoCapabilities.areSizeAndRateSupported(targetWidth, targetHeight, candidateFps.toDouble())
+                }
+                selectedFps = supportedCandidate ?: maxSupportedRate.coerceIn(24, 60)
+                Log.w(
+                    TAG,
+                    "Combinação ${targetWidth}x${targetHeight} @ ${fps} FPS não suportada pelo hardware. " +
+                        "Reduzindo automaticamente para ${selectedFps} FPS."
+                )
+            }
+        }
+
+        // TAREFA 3: Cálculo Dinâmico de Bitrate escalado por resolução e FPS, respeitando videoCapabilities.bitrateRange
+        var targetBitrate = calculateDynamicBitrate(targetWidth, targetHeight, selectedFps, bitrate)
+        if (videoCapabilities != null) {
+            targetBitrate = videoCapabilities.bitrateRange.clamp(targetBitrate)
+        }
+
+        actualWidth = targetWidth
+        actualHeight = targetHeight
+        actualFps = selectedFps
+        actualBitrate = targetBitrate
+
+        val mediaFormat = MediaFormat.createVideoFormat(mimeType, targetWidth, targetHeight).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            setInteger(MediaFormat.KEY_BIT_RATE, targetBitrate)
+            setInteger(MediaFormat.KEY_FRAME_RATE, selectedFps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1s keyframe
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
 
+            // TAREFA 3: Configuração de Alta Taxa de Quadros em tempo real no MediaFormat
+            setInteger(MediaFormat.KEY_PRIORITY, 0) // Prioridade máxima em tempo real
+            setFloat(MediaFormat.KEY_OPERATING_RATE, selectedFps.toFloat())
+
             // TAREFA 1: Desativar B-Frames e forçar baixa latência (ordem de decodificação = exibição)
-            if (!useHevc) {
+            // Para resoluções > 1080p ou FPS >= 90, o perfil Baseline pode ter limite de macroblocos em alguns SoCs,
+            // portanto aplicamos Baseline apenas até 1080p @ 60fps ou fazemos fallback seguro no configure().
+            if (!useHevc && targetWidth * targetHeight <= 1920 * 1080 && selectedFps <= 60) {
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
             }
             setInteger(MediaFormat.KEY_LATENCY, 0)
         }
 
-        val codec = MediaCodec.createEncoderByType(mimeType)
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        val surface = codec.createInputSurface()
-        codec.start()
+        try {
+            videoCodec.configure(mediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        } catch (e: MediaCodec.CodecException) {
+            Log.w(TAG, "CodecException na configuração inicial (${targetWidth}x${targetHeight} @ ${selectedFps}fps). Aplicando fallback seguro @ 60 FPS...", e)
+            videoCodec.reset()
+            selectedFps = minOf(selectedFps, 60)
+            actualFps = selectedFps
+            val fallbackBitrate = videoCapabilities?.bitrateRange?.clamp(
+                calculateDynamicBitrate(targetWidth, targetHeight, selectedFps, bitrate)
+            ) ?: 16_000_000
+            actualBitrate = fallbackBitrate
+
+            val fallbackFormat = MediaFormat.createVideoFormat(mimeType, targetWidth, targetHeight).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_BIT_RATE, fallbackBitrate)
+                setInteger(MediaFormat.KEY_FRAME_RATE, selectedFps)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setFloat(MediaFormat.KEY_OPERATING_RATE, selectedFps.toFloat())
+            }
+            videoCodec.configure(fallbackFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        }
+
+        val surface = videoCodec.createInputSurface()
+        videoCodec.start()
 
         // TAREFA 1: Requisitar Keyframe Imediato no Início da Gravação
         val syncBundle = Bundle().apply {
             putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
         }
-        codec.setParameters(syncBundle)
+        videoCodec.setParameters(syncBundle)
 
-        mediaCodec = codec
+        mediaCodec = videoCodec
         inputSurface = surface
 
         // TAREFA 2: Criação do VirtualDisplay ("DexRecorder", VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR)
         virtualDisplay = mediaProjection.createVirtualDisplay(
             "DexRecorder",
-            width,
-            height,
+            targetWidth,
+            targetHeight,
             dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             surface,
@@ -92,7 +243,11 @@ class ScreenVideoEncoder(
         )
 
         isRunning = true
-        Log.d(TAG, "ScreenVideoEncoder preparado: ${width}x${height} @ ${fps}fps, bitrate=$bitrate, mime=$mimeType, flag=AUTO_MIRROR")
+        Log.d(
+            TAG,
+            "ScreenVideoEncoder preparado: ${targetWidth}x${targetHeight} @ ${selectedFps}fps " +
+                "(solicitado=${fps}fps), bitrate=$targetBitrate, mime=$mimeType, flag=AUTO_MIRROR"
+        )
     }
 
     /**

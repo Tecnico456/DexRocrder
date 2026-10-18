@@ -1,6 +1,7 @@
 package com.example.audio
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
@@ -11,22 +12,28 @@ import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
 import android.util.Log
+import android.widget.Toast
 import com.example.model.AudioCaptureMode
 import com.example.video.MediaMuxerManager
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Pipeline completo e síncrono de Áudio:
  * AudioRecord (PCM 48.000 Hz Estéreo) -> MediaCodec (AAC LC 128 kbps) -> MediaMuxer sincronizado.
  *
- * TAREFA 1: Correspondência Exata de Formatos (48.000 Hz / Estéreo)
- * TAREFA 2: Pipeline de Alimentação Entrada/Saída do Codec de Áudio (Alimentar Entrada e Drenar Saída)
- * TAREFA 3: Validação de Trilha no Encerramento com BUFFER_FLAG_END_OF_STREAM
+ * Inclui:
+ * - TAREFA 1: Expansão de todos os atributos de captura permitidos no AudioPlaybackCaptureConfiguration.
+ * - TAREFA 2: Audio Mixer Real (ShortArray 16-bit) somando Áudio Interno + Microfone simultâneos com clamping.
+ * - TAREFA 3: Detector de Áudio Bloqueado pelo Jogo nos primeiros 5 segundos com aviso via Toast na Main Thread.
  */
 class AudioCaptureAndEncoder(
+    private val context: Context,
     private val mediaProjection: MediaProjection?,
     private val audioMode: AudioCaptureMode,
     private val muxerManager: MediaMuxerManager,
@@ -36,7 +43,7 @@ class AudioCaptureAndEncoder(
     companion object {
         private const val TAG = "AudioCaptureAndEncoder"
 
-        // TAREFA 1: Constantes globais unificadas
+        // Constantes globais unificadas (48.000 Hz / Estéreo)
         private const val SAMPLE_RATE = 48000
         private const val CHANNEL_COUNT = 2 // Estéreo nativo Samsung
         private const val AUDIO_BIT_RATE = 128000
@@ -44,6 +51,57 @@ class AudioCaptureAndEncoder(
         // Cada frame estéreo PCM 16-bit: 2 canais * 2 bytes = 4 bytes
         private const val BYTES_PER_FRAME = CHANNEL_COUNT * 2
         private const val CHUNK_SIZE_BYTES = 4096 // 1024 frames estéreo (~21.3ms)
+        private const val CHUNK_SIZE_SHORTS = CHUNK_SIZE_BYTES / 2 // 2048 amostras de 16-bits
+
+        private const val BLOCKED_AUDIO_CHECK_DURATION_MS = 5000L
+        const val BLOCKED_AUDIO_WARNING_MESSAGE =
+            "Aviso: Este aplicativo/jogo bloqueia a gravação de áudio interno pelo Android."
+
+        /**
+         * TAREFA 2: Soma as amostras de 16-bits (ShortArray) do áudio interno e do microfone
+         * aplicando ganho de volume e clamping entre Short.MIN_VALUE e Short.MAX_VALUE.
+         */
+        fun mixPcmShortBuffers(
+            internalBuffer: ShortArray,
+            internalShortsRead: Int,
+            internalVol: Float,
+            micBuffer: ShortArray,
+            micShortsRead: Int,
+            micVol: Float,
+            outputShorts: ShortArray,
+            sampleCount: Int
+        ) {
+            for (i in 0 until sampleCount) {
+                val internalSample = if (i < internalShortsRead) {
+                    (internalBuffer[i] * internalVol).toInt()
+                } else {
+                    0
+                }
+
+                val micSample = if (i < micShortsRead) {
+                    (micBuffer[i] * micVol).toInt()
+                } else {
+                    0
+                }
+
+                val summed = (internalSample + micSample)
+                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                    .toShort()
+
+                outputShorts[i] = summed
+            }
+        }
+
+        /**
+         * TAREFA 3: Verifica se todos os bytes lidos no buffer PCM são exatamente 0.
+         */
+        fun isBufferAllZeros(buffer: ByteArray, bytesRead: Int): Boolean {
+            if (bytesRead <= 0) return true
+            for (i in 0 until bytesRead) {
+                if (buffer[i].toInt() != 0) return false
+            }
+            return true
+        }
     }
 
     private var audioCodec: MediaCodec? = null
@@ -57,12 +115,13 @@ class AudioCaptureAndEncoder(
     private val isPaused = AtomicBoolean(false)
 
     private var captureThread: Thread? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     // Cálculo estritamente linear do PTS de áudio
     private var totalAudioBytesRead = 0L
 
     /**
-     * TAREFA 1: Inicializa o codificador MediaCodec AAC com os parâmetros exatos.
+     * Inicializa o codificador MediaCodec AAC com os parâmetros exatos.
      */
     fun prepare() {
         if (audioMode == AudioCaptureMode.MUTE) {
@@ -71,8 +130,11 @@ class AudioCaptureAndEncoder(
         }
 
         try {
-            // TAREFA 1: MediaFormat do Codificador de Áudio
-            val audioFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, SAMPLE_RATE, CHANNEL_COUNT).apply {
+            val audioFormat = MediaFormat.createAudioFormat(
+                MediaFormat.MIMETYPE_AUDIO_AAC,
+                SAMPLE_RATE,
+                CHANNEL_COUNT
+            ).apply {
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
                 setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BIT_RATE)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
@@ -85,7 +147,7 @@ class AudioCaptureAndEncoder(
 
             Log.d(TAG, "MediaCodec AAC inicializado com sucesso: 48000Hz, Estéreo, 128kbps")
 
-            // Inicializa os AudioRecords de acordo com o modo
+            // Inicializa os AudioRecords separados de acordo com o modo selecionado
             initAudioRecords()
 
             // Injeta um buffer inicial de silêncio para forçar a geração de INFO_OUTPUT_FORMAT_CHANGED
@@ -106,14 +168,17 @@ class AudioCaptureAndEncoder(
         )
         val bufferSize = maxOf(minBufferSize * 4, 32768)
 
+        // 1. Inicializa internalAudioRecord (para INTERNAL_ONLY ou MIXED_INTERNAL_MIC)
         if (audioMode == AudioCaptureMode.INTERNAL_ONLY || audioMode == AudioCaptureMode.MIXED_INTERNAL_MIC) {
             if (mediaProjection != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 try {
-                    // TAREFA 1: AudioPlaybackCaptureConfiguration com o mediaProjection ativo da tela
-                    val audioPlaybackConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                    // TAREFA 1: Expandir Todos os Atributos de Captura Permitidos para motores de jogos (AAudio/OpenSL ES)
+                    val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
                         .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
                         .addMatchingUsage(AudioAttributes.USAGE_GAME)
                         .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                        .addMatchingUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                        .addMatchingUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
                         .build()
 
                     val format = AudioFormat.Builder()
@@ -123,47 +188,59 @@ class AudioCaptureAndEncoder(
                         .build()
 
                     val record = AudioRecord.Builder()
-                        .setAudioPlaybackCaptureConfig(audioPlaybackConfig)
+                        .setAudioPlaybackCaptureConfig(config)
                         .setAudioFormat(format)
                         .setBufferSizeInBytes(bufferSize)
                         .build()
 
                     if (record.state == AudioRecord.STATE_INITIALIZED) {
                         internalAudioRecord = record
-                        Log.d(TAG, "Internal AudioRecord inicializado: 48000Hz, Estéreo, PCM 16-bit")
+                        Log.d(TAG, "internalAudioRecord inicializado: 48000Hz, Estéreo, PCM 16-bit (5 atributos de uso ativos)")
                     } else {
-                        Log.e(TAG, "Internal AudioRecord state != STATE_INITIALIZED (${record.state})")
+                        Log.e(TAG, "internalAudioRecord state != STATE_INITIALIZED (${record.state})")
                         record.release()
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Erro ao instanciar Internal AudioRecord com AudioPlaybackCapture", e)
+                    Log.e(TAG, "Erro ao instanciar internalAudioRecord com AudioPlaybackCapture", e)
                 }
             } else {
                 Log.w(TAG, "mediaProjection nulo ou Android < 10. Impossível capturar áudio interno.")
             }
         }
 
+        // 2. Inicializa micAudioRecord (para MIC_ONLY ou MIXED_INTERNAL_MIC)
         if (audioMode == AudioCaptureMode.MIC_ONLY || audioMode == AudioCaptureMode.MIXED_INTERNAL_MIC) {
+            micAudioRecord = createMicAudioRecord(bufferSize)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun createMicAudioRecord(bufferSize: Int): AudioRecord? {
+        val sources = intArrayOf(
+            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        )
+        for (source in sources) {
             try {
                 val record = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
+                    source,
                     SAMPLE_RATE,
                     AudioFormat.CHANNEL_IN_STEREO,
                     AudioFormat.ENCODING_PCM_16BIT,
                     bufferSize
                 )
-
                 if (record.state == AudioRecord.STATE_INITIALIZED) {
-                    micAudioRecord = record
-                    Log.d(TAG, "Mic AudioRecord inicializado: 48000Hz, Estéreo, PCM 16-bit")
+                    Log.d(TAG, "micAudioRecord inicializado: source=$source, 48000Hz, Estéreo, PCM 16-bit")
+                    return record
                 } else {
-                    Log.e(TAG, "Mic AudioRecord state != STATE_INITIALIZED (${record.state})")
                     record.release()
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Erro ao instanciar Mic AudioRecord", e)
+                Log.w(TAG, "Falha ao tentar inicializar micAudioRecord com source=$source", e)
             }
         }
+        Log.e(TAG, "Não foi possível inicializar micAudioRecord em nenhuma fonte de áudio.")
+        return null
     }
 
     /**
@@ -229,16 +306,25 @@ class AudioCaptureAndEncoder(
     }
 
     /**
-     * TAREFA 2: Pipeline de Alimentação Entrada/Saída do Codec de Áudio
-     * Validação estrita do AudioRecord e injeção de amostras PCM válidas (bytesRead > 0).
+     * Loop principal de leitura, detecção de bloqueio de áudio (DRM) e mixagem PCM 16-bit (ShortArray).
      */
     private fun runAudioPipelineLoop() {
         val internalRecord = internalAudioRecord
         val micRecord = micAudioRecord
 
-        val readBufferInternal = ByteArray(CHUNK_SIZE_BYTES)
-        val readBufferMic = ByteArray(CHUNK_SIZE_BYTES)
-        val mixedBuffer = ByteArray(CHUNK_SIZE_BYTES)
+        // Buffers de 16-bits (ShortArray) e ByteArray para alimentação do MediaCodec AAC
+        val readBufferInternalBytes = ByteArray(CHUNK_SIZE_BYTES)
+        val shortBufferInternal = ShortArray(CHUNK_SIZE_SHORTS)
+        val shortBufferMic = ShortArray(CHUNK_SIZE_SHORTS)
+        val mixedShorts = ShortArray(CHUNK_SIZE_SHORTS)
+        val pcmOutputBytes = ByteArray(CHUNK_SIZE_BYTES)
+
+        // TAREFA 3: Variáveis de controle para detecção de áudio bloqueado nos primeiros 5 segundos
+        var activeCheckDurationMs = 0L
+        var lastCheckTimestampMs = System.currentTimeMillis()
+        var allZeroInFirst5Seconds = true
+        var hasReadAnyInternalBuffer = false
+        var silenceCheckCompleted = false
 
         while (isRecording.get() && !Thread.currentThread().isInterrupted) {
             if (isPaused.get()) {
@@ -247,6 +333,7 @@ class AudioCaptureAndEncoder(
                 } catch (_: InterruptedException) {
                     break
                 }
+                lastCheckTimestampMs = System.currentTimeMillis()
                 continue
             }
 
@@ -259,7 +346,6 @@ class AudioCaptureAndEncoder(
                         continue
                     }
 
-                    // TAREFA 2: Verificação de Inicialização do AudioRecord
                     if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                         try {
                             record.startRecording()
@@ -271,18 +357,37 @@ class AudioCaptureAndEncoder(
                         }
                     }
 
-                    // TAREFA 2: Tratamento do Retorno de Leitura
-                    val bytesRead = record.read(readBufferInternal, 0, readBufferInternal.size)
+                    val bytesRead = record.read(readBufferInternalBytes, 0, readBufferInternalBytes.size)
                     if (bytesRead <= 0) {
-                        // Se retornar ERROR_INVALID_OPERATION (-3) ou ERROR_BAD_VALUE (-2), NÃO envie para o codec!
                         Log.e("DexRecorderAudio", "Falha na leitura do AudioRecord. Código: $bytesRead")
                         drainOutput(endOfStream = false)
                         try { Thread.sleep(10) } catch (_: InterruptedException) { break }
                         continue
                     }
 
-                    applyVolume(readBufferInternal, bytesRead, internalVolume)
-                    feedCodecInput(readBufferInternal, bytesRead)
+                    // TAREFA 3: Detector de Áudio Bloqueado pelo Jogo nos primeiros 5 segundos
+                    if (!silenceCheckCompleted) {
+                        val now = System.currentTimeMillis()
+                        activeCheckDurationMs += (now - lastCheckTimestampMs).coerceAtLeast(0L)
+                        lastCheckTimestampMs = now
+                        hasReadAnyInternalBuffer = true
+
+                        if (allZeroInFirst5Seconds && !isBufferAllZeros(readBufferInternalBytes, bytesRead)) {
+                            allZeroInFirst5Seconds = false
+                            silenceCheckCompleted = true
+                        }
+
+                        if (!silenceCheckCompleted && activeCheckDurationMs >= BLOCKED_AUDIO_CHECK_DURATION_MS) {
+                            silenceCheckCompleted = true
+                            if (allZeroInFirst5Seconds && hasReadAnyInternalBuffer) {
+                                Log.w(TAG, "Detectado buffer PCM 100% zerado nos primeiros 5s. Exibindo aviso de bloqueio DRM/AudioPlaybackCapture.")
+                                notifyBlockedInternalAudio()
+                            }
+                        }
+                    }
+
+                    applyVolume(readBufferInternalBytes, bytesRead, internalVolume)
+                    feedCodecInput(readBufferInternalBytes, bytesRead)
                     drainOutput(endOfStream = false)
                 }
 
@@ -294,83 +399,97 @@ class AudioCaptureAndEncoder(
                         continue
                     }
 
-                    // TAREFA 2: Verificação de Inicialização do AudioRecord
                     if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                         try {
                             record.startRecording()
                         } catch (e: Exception) {
-                            Log.e("DexRecorderAudio", "Falha ao iniciar AudioRecord: ${e.message}")
+                            Log.e("DexRecorderAudio", "Falha ao iniciar Mic AudioRecord: ${e.message}")
                             drainOutput(endOfStream = false)
                             try { Thread.sleep(10) } catch (_: InterruptedException) { break }
                             continue
                         }
                     }
 
-                    // TAREFA 2: Tratamento do Retorno de Leitura
-                    val bytesRead = record.read(readBufferMic, 0, readBufferMic.size)
-                    if (bytesRead <= 0) {
-                        // Se retornar ERROR_INVALID_OPERATION (-3) ou ERROR_BAD_VALUE (-2), NÃO envie para o codec!
-                        Log.e("DexRecorderAudio", "Falha na leitura do AudioRecord. Código: $bytesRead")
+                    val shortsRead = record.read(shortBufferMic, 0, shortBufferMic.size)
+                    if (shortsRead <= 0) {
+                        Log.e("DexRecorderAudio", "Falha na leitura do Mic AudioRecord. Código: $shortsRead")
                         drainOutput(endOfStream = false)
                         try { Thread.sleep(10) } catch (_: InterruptedException) { break }
                         continue
                     }
 
-                    applyVolume(readBufferMic, bytesRead, micVolume)
-                    feedCodecInput(readBufferMic, bytesRead)
-                    drainOutput(endOfStream = false)
+                    val alignedShorts = (shortsRead / CHANNEL_COUNT) * CHANNEL_COUNT
+                    for (i in 0 until alignedShorts) {
+                        val scaled = (shortBufferMic[i] * micVolume).toInt()
+                            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                            .toShort()
+                        val byteIdx = i * 2
+                        pcmOutputBytes[byteIdx] = (scaled.toInt() and 0xFF).toByte()
+                        pcmOutputBytes[byteIdx + 1] = ((scaled.toInt() shr 8) and 0xFF).toByte()
+                    }
+
+                    val bytesToFeed = alignedShorts * 2
+                    if (bytesToFeed > 0) {
+                        feedCodecInput(pcmOutputBytes, bytesToFeed)
+                        drainOutput(endOfStream = false)
+                    }
                 }
 
                 AudioCaptureMode.MIXED_INTERNAL_MIC -> {
+                    // TAREFA 2: Audio Mixer Real (Áudio Interno + Microfone Simultâneos em ShortArray 16-bits)
                     val intRec = internalRecord
                     val mRec = micRecord
 
                     if (intRec != null && intRec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                        try { intRec.startRecording() } catch (e: Exception) { Log.e("DexRecorderAudio", "Falha ao iniciar intRec: ${e.message}") }
+                        try { intRec.startRecording() } catch (e: Exception) {
+                            Log.e("DexRecorderAudio", "Falha ao iniciar internalAudioRecord: ${e.message}")
+                        }
                     }
                     if (mRec != null && mRec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                        try { mRec.startRecording() } catch (e: Exception) { Log.e("DexRecorderAudio", "Falha ao iniciar mRec: ${e.message}") }
+                        try { mRec.startRecording() } catch (e: Exception) {
+                            Log.e("DexRecorderAudio", "Falha ao iniciar micAudioRecord: ${e.message}")
+                        }
                     }
 
-                    val intRead = intRec?.read(readBufferInternal, 0, readBufferInternal.size) ?: -1
-                    val mRead = mRec?.read(readBufferMic, 0, readBufferMic.size) ?: -1
+                    val intShortsRead = intRec?.read(shortBufferInternal, 0, shortBufferInternal.size) ?: -1
+                    val micShortsRead = mRec?.read(shortBufferMic, 0, shortBufferMic.size) ?: -1
 
-                    if (intRead <= 0 && mRead <= 0) {
-                        Log.e("DexRecorderAudio", "Falha na leitura do AudioRecord. Código: int=$intRead, mic=$mRead")
+                    if (intShortsRead <= 0 && micShortsRead <= 0) {
+                        Log.e("DexRecorderAudio", "Falha na leitura de ambos AudioRecords. int=$intShortsRead, mic=$micShortsRead")
                         drainOutput(endOfStream = false)
                         try { Thread.sleep(10) } catch (_: InterruptedException) { break }
                         continue
                     }
 
-                    val finalBuffer: ByteArray
-                    val finalBytes: Int
+                    // Determina o número de amostras de 16-bits lidas (alinhado ao par estéreo)
+                    val rawSamplesCount = maxOf(
+                        if (intShortsRead > 0) intShortsRead else 0,
+                        if (micShortsRead > 0) micShortsRead else 0
+                    )
+                    val alignedSamplesCount = (rawSamplesCount / CHANNEL_COUNT) * CHANNEL_COUNT
 
-                    if (intRead > 0 && mRead > 0) {
-                        val count = maxOf(intRead, mRead)
-                        mixPcmStereo(
-                            internalBuffer = readBufferInternal,
-                            internalLength = intRead,
+                    if (alignedSamplesCount > 0) {
+                        mixPcmShortBuffers(
+                            internalBuffer = shortBufferInternal,
+                            internalShortsRead = if (intShortsRead > 0) intShortsRead else 0,
                             internalVol = internalVolume,
-                            micBuffer = readBufferMic,
-                            micLength = mRead,
+                            micBuffer = shortBufferMic,
+                            micShortsRead = if (micShortsRead > 0) micShortsRead else 0,
                             micVol = micVolume,
-                            output = mixedBuffer,
-                            maxFrames = count / 2
+                            outputShorts = mixedShorts,
+                            sampleCount = alignedSamplesCount
                         )
-                        finalBuffer = mixedBuffer
-                        finalBytes = (count / BYTES_PER_FRAME) * BYTES_PER_FRAME
-                    } else if (intRead > 0) {
-                        applyVolume(readBufferInternal, intRead, internalVolume)
-                        finalBuffer = readBufferInternal
-                        finalBytes = intRead
-                    } else {
-                        applyVolume(readBufferMic, mRead, micVolume)
-                        finalBuffer = readBufferMic
-                        finalBytes = mRead
-                    }
 
-                    if (finalBytes > 0) {
-                        feedCodecInput(finalBuffer, finalBytes)
+                        // Converte o ShortArray mixado para ByteArray Little-Endian (PCM 16-bit)
+                        for (i in 0 until alignedSamplesCount) {
+                            val sample = mixedShorts[i].toInt()
+                            val byteIdx = i * 2
+                            pcmOutputBytes[byteIdx] = (sample and 0xFF).toByte()
+                            pcmOutputBytes[byteIdx + 1] = ((sample shr 8) and 0xFF).toByte()
+                        }
+
+                        val bytesToFeed = alignedSamplesCount * 2
+                        feedCodecInput(pcmOutputBytes, bytesToFeed)
                         drainOutput(endOfStream = false)
                     }
                 }
@@ -383,10 +502,20 @@ class AudioCaptureAndEncoder(
     }
 
     /**
-     * TAREFA 2: Alimentar Entrada (Input Buffer)
-     * - audioCodec.dequeueInputBuffer(10000L)
-     * - transfere os bytes para o inputBuffer
-     * - audioCodec.queueInputBuffer(inputIndex, 0, bytesRead, audioPtsUs, 0)
+     * TAREFA 3: Exibe o Toast na Main Thread caso todos os bytes nos primeiros 5 segundos sejam zero.
+     */
+    private fun notifyBlockedInternalAudio() {
+        mainHandler.post {
+            Toast.makeText(
+                context.applicationContext,
+                BLOCKED_AUDIO_WARNING_MESSAGE,
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    /**
+     * Alimentar Entrada (Input Buffer) do MediaCodec AAC
      */
     private fun feedCodecInput(buffer: ByteArray, bytesRead: Int) {
         val codec = audioCodec ?: return
@@ -408,10 +537,7 @@ class AudioCaptureAndEncoder(
     }
 
     /**
-     * TAREFA 2: Drenar Saída (Output Buffer)
-     * - audioCodec.dequeueOutputBuffer(bufferInfo, 10000L)
-     * - se INFO_OUTPUT_FORMAT_CHANGED: audioTrackIndex = mediaMuxer.addTrack(audioCodec.outputFormat)
-     * - se >= 0: synchronized(muxerLock) { writeSampleData(...) } e releaseOutputBuffer
+     * Drenar Saída (Output Buffer) do MediaCodec AAC para o MediaMuxer
      */
     private fun drainOutput(endOfStream: Boolean) {
         val codec = audioCodec ?: return
@@ -466,7 +592,6 @@ class AudioCaptureAndEncoder(
     }
 
     /**
-     * TAREFA 3: Validação de Trilha no Encerramento
      * Envia o sinal de final de fluxo (BUFFER_FLAG_END_OF_STREAM) para a entrada do codec de áudio
      * para que todos os pacotes pendentes sejam descarregados no MediaMuxer antes de mediaMuxer.stop().
      */
@@ -494,7 +619,6 @@ class AudioCaptureAndEncoder(
             Log.w(TAG, "Exceção ao parar micAudioRecord", e)
         }
 
-        // TAREFA 3: Envio de BUFFER_FLAG_END_OF_STREAM para o codec
         val codec = audioCodec
         if (codec != null) {
             try {
@@ -510,7 +634,6 @@ class AudioCaptureAndEncoder(
                     )
                 }
 
-                // Drena todos os pacotes codificados pendentes para o MediaMuxer
                 drainOutput(endOfStream = true)
 
                 codec.stop()
@@ -535,37 +658,6 @@ class AudioCaptureAndEncoder(
             val scaled = (sample * volume).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
             buffer[idx] = (scaled.toInt() and 0xFF).toByte()
             buffer[idx + 1] = ((scaled.toInt() shr 8) and 0xFF).toByte()
-        }
-    }
-
-    private fun mixPcmStereo(
-        internalBuffer: ByteArray,
-        internalLength: Int,
-        internalVol: Float,
-        micBuffer: ByteArray,
-        micLength: Int,
-        micVol: Float,
-        output: ByteArray,
-        maxFrames: Int
-    ) {
-        for (i in 0 until maxFrames) {
-            val idx = i * 2
-
-            val s1 = if (idx + 1 < internalLength) {
-                val low = internalBuffer[idx].toInt() and 0xFF
-                val high = internalBuffer[idx + 1].toInt()
-                ((high shl 8) or low).toShort()
-            } else 0
-
-            val s2 = if (idx + 1 < micLength) {
-                val low = micBuffer[idx].toInt() and 0xFF
-                val high = micBuffer[idx + 1].toInt()
-                ((high shl 8) or low).toShort()
-            } else 0
-
-            val mixed = ((s1 * internalVol) + (s2 * micVol)).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-            output[idx] = (mixed.toInt() and 0xFF).toByte()
-            output[idx + 1] = ((mixed.toInt() shr 8) and 0xFF).toByte()
         }
     }
 }
