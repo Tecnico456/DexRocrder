@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.filled.AppShortcut
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
@@ -39,7 +40,6 @@ import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -562,7 +562,7 @@ private fun AudioCaptureModeCard(
                         AudioCaptureMode.INTERNAL_ONLY -> Icons.Default.Headphones
                         AudioCaptureMode.MIXED_INTERNAL_MIC -> Icons.Default.Radio
                         AudioCaptureMode.MIC_ONLY -> Icons.Default.Mic
-                        AudioCaptureMode.MUTE -> Icons.Default.VolumeOff
+                        AudioCaptureMode.MUTE -> Icons.AutoMirrored.Filled.VolumeOff
                     }
 
                     Icon(
