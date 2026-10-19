@@ -52,6 +52,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _editingStatusMessage = MutableStateFlow<String?>(null)
     val editingStatusMessage: StateFlow<String?> = _editingStatusMessage.asStateFlow()
 
+    init {
+        // Sincroniza em tempo real o Switch da tela principal quando a bola é fechada pelo botão "X" ou arrastada para a lixeira
+        viewModelScope.launch {
+            FloatingOverlayService.switchSyncFlow.collect { enabled ->
+                if (enabled != null && _settings.value.showFloatingBall != enabled) {
+                    val synced = _settings.value.copy(showFloatingBall = enabled)
+                    _settings.value = synced
+                    ScreenRecordingService.currentSettings = synced
+                    SettingsPreferences.save(getApplication(), synced)
+                }
+            }
+        }
+    }
+
     fun updateSettings(transform: (RecordingSettings) -> RecordingSettings) {
         val newSettings = transform(_settings.value)
         _settings.value = newSettings
@@ -88,13 +102,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         updateSettings { it.copy(countdownSeconds = seconds) }
     }
 
+    /**
+     * TAREFA 4: Sincronização Imediata com o Switch do Aplicativo
+     * Quando o usuário desligar o Switch da "Bola Flutuante" dentro da tela principal do aplicativo,
+     * envia imediatamente o comando ACTION_HIDE_BALL e stopService para remover o overlay da tela no mesmo instante.
+     */
     fun toggleFloatingBall(context: Context, enabled: Boolean) {
         updateSettings { it.copy(showFloatingBall = enabled) }
-        if (Settings.canDrawOverlays(context)) {
-            val intent = Intent(context, FloatingOverlayService::class.java).apply {
-                action = if (enabled) FloatingOverlayService.ACTION_SHOW_BALL else FloatingOverlayService.ACTION_HIDE_BALL
+        FloatingOverlayService.notifySwitchStateChanged(enabled)
+        if (enabled) {
+            if (Settings.canDrawOverlays(context)) {
+                val intent = Intent(context, FloatingOverlayService::class.java).apply {
+                    action = FloatingOverlayService.ACTION_SHOW_BALL
+                }
+                context.startService(intent)
             }
-            context.startService(intent)
+        } else {
+            val hideIntent = Intent(context, FloatingOverlayService::class.java).apply {
+                action = FloatingOverlayService.ACTION_HIDE_BALL
+            }
+            context.startService(hideIntent)
+            context.stopService(Intent(context, FloatingOverlayService::class.java))
         }
     }
 

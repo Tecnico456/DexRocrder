@@ -627,6 +627,22 @@ class ScreenRecordingService : Service() {
         }
     }
 
+    /**
+     * TAREFA 3: Fechar Automaticamente ao Encerrar o App nos Recentes (onTaskRemoved)
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        val status = _recordingStatus.value
+        val isRecording = status is RecordingStatus.Recording ||
+            status is RecordingStatus.Paused ||
+            status is RecordingStatus.Countdown
+        // Se não houver uma gravação ativa no momento, fecha a bola flutuante ao fechar o app
+        if (!isRecording) {
+            stopService(Intent(this, FloatingOverlayService::class.java))
+            stopSelf()
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         try {

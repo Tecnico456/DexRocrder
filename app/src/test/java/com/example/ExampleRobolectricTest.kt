@@ -40,37 +40,48 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify PCM ShortArray mixer sums and clamps properly and handles zeroed internal audio`() {
-        val internalShorts = shortArrayOf(0, 0, 25000, -25000)
-        val micShorts = shortArrayOf(12000, -8000, 15000, -15000)
-        val outputShorts = ShortArray(4)
+    fun `verify PCM ShortArray mixer sums, applies noise gate, and clamps properly`() {
+        val internalShorts = shortArrayOf(0, 0, 25000, -25000, 10000, -10000)
+        // Samples 4 and 5 (80, -120) are low-level mic hiss below NOISE_GATE_THRESHOLD (180)
+        val micShorts = shortArrayOf(12000, -8000, 15000, -15000, 80, -120)
+        val outputShorts = ShortArray(6)
 
         com.example.audio.AudioCaptureAndEncoder.mixPcmShortBuffers(
             internalBuffer = internalShorts,
-            internalShortsRead = 4,
+            internalShortsRead = 6,
             internalVol = 1.0f,
             micBuffer = micShorts,
-            micShortsRead = 4,
+            micShortsRead = 6,
             micVol = 1.0f,
             outputShorts = outputShorts,
-            sampleCount = 4
+            sampleCount = 6
         )
 
-        // When internal channel delivers 0 (DRM blocked), mic audio passes through intact
+        // When internal channel delivers 0 (DRM blocked), active mic audio passes through intact
         assertEquals(12000.toShort(), outputShorts[0])
         assertEquals((-8000).toShort(), outputShorts[1])
         // Clamping at Short.MAX_VALUE and Short.MIN_VALUE
         assertEquals(Short.MAX_VALUE, outputShorts[2])
         assertEquals(Short.MIN_VALUE, outputShorts[3])
+        // Noise Gate blocks microphone hiss (< 180) from polluting clean internal game audio
+        assertEquals(10000.toShort(), outputShorts[4])
+        assertEquals((-10000).toShort(), outputShorts[5])
+        // Verify AAC bitrate is 192 kbps
+        assertEquals(192_000, com.example.audio.AudioCaptureAndEncoder.AUDIO_BIT_RATE)
     }
 
     @Test
-    fun `verify blocked audio zero buffer detector and warning message`() {
+    fun `verify blocked audio zero buffer detector on ByteArray and direct ByteBuffer`() {
         val zeroBuffer = ByteArray(4096)
         assertEquals(true, com.example.audio.AudioCaptureAndEncoder.isBufferAllZeros(zeroBuffer, 4096))
 
         zeroBuffer[100] = 5
         assertEquals(false, com.example.audio.AudioCaptureAndEncoder.isBufferAllZeros(zeroBuffer, 4096))
+
+        val directBuf = java.nio.ByteBuffer.allocateDirect(1024)
+        assertEquals(true, com.example.audio.AudioCaptureAndEncoder.isDirectBufferAllZeros(directBuf, 1024))
+        directBuf.put(512, 1.toByte())
+        assertEquals(false, com.example.audio.AudioCaptureAndEncoder.isDirectBufferAllZeros(directBuf, 1024))
 
         assertEquals(
             "Aviso: Este aplicativo/jogo bloqueia a gravação de áudio interno pelo Android.",
@@ -135,4 +146,39 @@ class ExampleRobolectricTest {
         assertEquals(false, loadedSettings.showFloatingBall)
         assertEquals(0.6f, loadedSettings.floatingBallOpacity, 0.001f)
     }
+
+    @Test
+    fun `verify FloatingBallView close button, drag-to-close target, and FloatingOverlayService onTaskRemoved`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+
+        var closeCallbackTriggered = false
+        val ballView = com.example.overlay.FloatingBallView(
+            context = context,
+            windowManager = wm,
+            onToggleBrush = {},
+            onToggleFacecam = {},
+            onCloseBall = { closeCallbackTriggered = true }
+        )
+
+        // Verify menu expands on toggleMenu()
+        assertEquals(false, ballView.isMenuExpanded)
+        ballView.toggleMenu()
+        assertEquals(true, ballView.isMenuExpanded)
+
+        // Verify bottom-center drag-to-close zone detection
+        val metrics = context.resources.displayMetrics
+        val centerBottomX = metrics.widthPixels / 2f
+        val centerBottomY = metrics.heightPixels - (64 * metrics.density)
+        assertEquals(true, ballView.isInsideCloseTarget(centerBottomX, centerBottomY))
+        assertEquals(false, ballView.isInsideCloseTarget(10f, 10f))
+
+        // Verify onTaskRemoved on FloatingOverlayService removes overlay when not recording
+        val service = org.robolectric.Robolectric.setupService(com.example.service.FloatingOverlayService::class.java)
+        service.onTaskRemoved(android.content.Intent())
+        assertEquals(false, com.example.service.FloatingOverlayService.isFloatingBallVisible)
+        assertNotNull(ballView.closeTargetOverlay)
+        assertEquals(false, closeCallbackTriggered)
+    }
 }
+

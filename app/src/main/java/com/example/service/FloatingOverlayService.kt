@@ -11,9 +11,14 @@ import android.view.WindowManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import com.example.model.RecordingStatus
+import com.example.model.SettingsPreferences
 import com.example.overlay.BrushOverlayView
 import com.example.overlay.FacecamOverlayView
 import com.example.overlay.FloatingBallView
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 class FloatingOverlayService : Service(), LifecycleOwner {
 
@@ -26,9 +31,20 @@ class FloatingOverlayService : Service(), LifecycleOwner {
 
         const val EXTRA_OPACITY = "extra_opacity"
 
+        private val _floatingBallVisibleFlow = MutableStateFlow(false)
+        val floatingBallVisibleFlow: StateFlow<Boolean> = _floatingBallVisibleFlow.asStateFlow()
+
+        // Fluxo reativo para sincronizar o Switch da tela principal quando a bola é fechada pelo "X" ou arrastada
+        private val _switchSyncFlow = MutableStateFlow<Boolean?>(null)
+        val switchSyncFlow: StateFlow<Boolean?> = _switchSyncFlow.asStateFlow()
+
         @Volatile
         var isFloatingBallVisible = false
             private set
+
+        fun notifySwitchStateChanged(enabled: Boolean) {
+            _switchSyncFlow.value = enabled
+        }
     }
 
     private val tag = "FloatingOverlayService"
@@ -51,15 +67,25 @@ class FloatingOverlayService : Service(), LifecycleOwner {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_HIDE_BALL) {
+            removeFloatingBallOverlay()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         if (!Settings.canDrawOverlays(this)) {
             Log.w(tag, "Overlay permission not granted, cannot display floating windows")
+            removeFloatingBallOverlay()
             stopSelf()
             return START_NOT_STICKY
         }
 
         when (intent?.action) {
             ACTION_SHOW_BALL -> showFloatingBall()
-            ACTION_HIDE_BALL -> hideFloatingBall()
+            ACTION_HIDE_BALL -> {
+                removeFloatingBallOverlay()
+                stopSelf()
+            }
             ACTION_TOGGLE_BRUSH -> toggleBrush()
             ACTION_TOGGLE_FACECAM -> toggleFacecam()
             ACTION_UPDATE_OPACITY -> {
@@ -69,7 +95,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
             else -> showFloatingBall()
         }
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun showFloatingBall() {
@@ -78,29 +104,76 @@ class FloatingOverlayService : Service(), LifecycleOwner {
                 context = this,
                 windowManager = windowManager!!,
                 onToggleBrush = { toggleBrush() },
-                onToggleFacecam = { toggleFacecam() }
+                onToggleFacecam = { toggleFacecam() },
+                onCloseBall = { closeFloatingBallFromOverlay() }
             )
             ball.setBallAlpha(ScreenRecordingService.currentSettings.floatingBallOpacity)
             try {
                 windowManager?.addView(ball, ball.layoutParams)
                 floatingBallView = ball
                 isFloatingBallVisible = true
+                _floatingBallVisibleFlow.value = true
+                _switchSyncFlow.value = true
                 Log.d(tag, "Floating Ball attached to window")
             } catch (e: Exception) {
                 Log.e(tag, "Error adding floating ball view", e)
             }
+        } else {
+            isFloatingBallVisible = floatingBallView != null
+            _floatingBallVisibleFlow.value = isFloatingBallVisible
         }
     }
 
-    private fun hideFloatingBall() {
-        floatingBallView?.let {
+    /**
+     * TAREFA 1 & TAREFA 2: Chamado ao clicar no botão "X" da bola flutuante
+     * ou ao arrastar e soltar a bola sobre o alvo vermelho inferior.
+     * Remove imediatamente a view do WindowManager, atualiza o estado de visibilidade
+     * (incluindo o Switch da tela principal) para false e encerra o serviço (stopSelf()).
+     */
+    private fun closeFloatingBallFromOverlay() {
+        removeFloatingBallOverlay()
+        val updated = ScreenRecordingService.currentSettings.copy(showFloatingBall = false)
+        ScreenRecordingService.currentSettings = updated
+        SettingsPreferences.save(this, updated)
+        _switchSyncFlow.value = false
+        stopSelf()
+    }
+
+    /**
+     * Remove imediatamente a view da bola flutuante (e o alvo de arraste) do WindowManager
+     * e atualiza o estado de visibilidade para false.
+     */
+    fun removeFloatingBallOverlay() {
+        floatingBallView?.let { ball ->
+            ball.hideCloseTargetOverlay()
             try {
-                windowManager?.removeView(it)
+                windowManager?.removeView(ball)
             } catch (e: Exception) {
                 Log.w(tag, "Error removing floating ball", e)
             }
-            floatingBallView = null
-            isFloatingBallVisible = false
+        }
+        floatingBallView = null
+        isFloatingBallVisible = false
+        _floatingBallVisibleFlow.value = false
+    }
+
+    private fun hideFloatingBall() {
+        removeFloatingBallOverlay()
+    }
+
+    /**
+     * TAREFA 3: Fechar Automaticamente ao Encerrar o App nos Recentes (onTaskRemoved)
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        val status = ScreenRecordingService.recordingStatus.value
+        val isRecording = status is RecordingStatus.Recording ||
+            status is RecordingStatus.Paused ||
+            status is RecordingStatus.Countdown
+        // Se não houver uma gravação ativa no momento, fecha a bola flutuante ao fechar o app
+        if (!isRecording) {
+            removeFloatingBallOverlay()
+            stopSelf()
         }
     }
 
@@ -163,7 +236,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
 
     override fun onDestroy() {
         super.onDestroy()
-        hideFloatingBall()
+        removeFloatingBallOverlay()
         brushOverlayView?.let {
             try {
                 windowManager?.removeView(it)
@@ -179,3 +252,4 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
     }
 }
+

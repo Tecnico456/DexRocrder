@@ -103,13 +103,17 @@ fun RecordDashboardScreen(
     val status by viewModel.recordingStatus.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
-    // TAREFA 3: Ao iniciar a tela principal, verifica se a Bola Flutuante está ativa e se a permissão já foi concedida
+    // TAREFA 3 & 4: Sincroniza o serviço da Bola Flutuante imediatamente com o estado de settings.showFloatingBall
     LaunchedEffect(settings.showFloatingBall) {
-        if (settings.showFloatingBall && Settings.canDrawOverlays(context)) {
-            val intent = Intent(context, FloatingOverlayService::class.java).apply {
-                action = FloatingOverlayService.ACTION_SHOW_BALL
+        if (settings.showFloatingBall) {
+            if (Settings.canDrawOverlays(context)) {
+                val intent = Intent(context, FloatingOverlayService::class.java).apply {
+                    action = FloatingOverlayService.ACTION_SHOW_BALL
+                }
+                context.startService(intent)
             }
-            context.startService(intent)
+        } else {
+            context.stopService(Intent(context, FloatingOverlayService::class.java))
         }
     }
 
