@@ -172,9 +172,6 @@ class FloatingOverlayService : Service(), LifecycleOwner {
             isFloatingBallVisible = floatingBallView != null
             _floatingBallVisibleFlow.value = isFloatingBallVisible
         }
-        if (!ScreenRecordingService.isStartingOrRecording) {
-            ScreenRecordingService.showOrUpdateControlNotification(this)
-        }
     }
 
     /**

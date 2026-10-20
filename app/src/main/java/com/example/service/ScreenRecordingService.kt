@@ -101,6 +101,9 @@ class ScreenRecordingService : Service() {
         var chronometerBaseRealtime: Long = 0L
             private set
 
+        @Volatile
+        private var lastNotifiedSignature: String? = null
+
         /**
          * Prepara o estado imediatamente após o usuário aprovar o MediaProjection na MainActivity,
          * evitando que onResume() ou outros serviços sobrescrevam a notificação com o estado ocioso.
@@ -434,8 +437,13 @@ class ScreenRecordingService : Service() {
         /**
          * Método unificado que exibe ou atualiza a barra de controle na notificação do sistema
          * mantendo sempre o RemoteViews customizado (notification_dex_controls.xml) e seus botões.
+         * Deduplica chamadas idênticas para evitar Rate Limiting no SystemUI do Samsung DeX.
          */
-        fun showOrUpdateControlNotification(context: Context, blinkPhase: Boolean = true) {
+        fun showOrUpdateControlNotification(
+            context: Context,
+            blinkPhase: Boolean = true,
+            forceUpdate: Boolean = false
+        ) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 if (ContextCompat.checkSelfPermission(
                         context,
@@ -451,13 +459,22 @@ class ScreenRecordingService : Service() {
                 status is RecordingStatus.Paused ||
                 status is RecordingStatus.Countdown
             val isPaused = status is RecordingStatus.Paused
+            val brushActive = FloatingOverlayService.isBrushActive
+            val facecamActive = FloatingOverlayService.isFacecamActive
+
+            val signature = "$isRecording:$isPaused:$brushActive:$facecamActive"
+            if (!forceUpdate && signature == lastNotifiedSignature) {
+                return
+            }
+            lastNotifiedSignature = signature
+
             val durationMs = when (status) {
                 is RecordingStatus.Recording -> status.durationMs
                 is RecordingStatus.Paused -> status.durationMs
                 else -> 0L
             }
             val baseTime = if (isRecording) {
-                if (chronometerBaseRealtime > 0L && durationMs == 0L) {
+                if (chronometerBaseRealtime > 0L && !isPaused) {
                     chronometerBaseRealtime
                 } else {
                     SystemClock.elapsedRealtime() - durationMs
@@ -471,6 +488,8 @@ class ScreenRecordingService : Service() {
                 isRecording = isRecording,
                 isPaused = isPaused,
                 elapsedText = elapsedText,
+                isBrushActive = brushActive,
+                isFacecamActive = facecamActive,
                 blinkPhase = blinkPhase,
                 chronometerBase = baseTime
             )
@@ -479,6 +498,7 @@ class ScreenRecordingService : Service() {
         }
 
         fun cancelControlNotification(context: Context) {
+            lastNotifiedSignature = null
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.cancel(NOTIFICATION_ID)
         }
@@ -563,6 +583,7 @@ class ScreenRecordingService : Service() {
                 if (resultCode != Activity.RESULT_OK || resultData == null) {
                     Log.e(tag, "Intent de início inválida: resultCode não é RESULT_OK ou dados nulos")
                     isStartingOrRecording = false
+                    lastNotifiedSignature = null
                     val initialNotification = buildNotification(isRecording = false, isPaused = false, elapsedText = "00:00")
                     startForeground(NOTIFICATION_ID, initialNotification)
                     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -577,7 +598,7 @@ class ScreenRecordingService : Service() {
                 chronometerBaseRealtime = SystemClock.elapsedRealtime()
                 _recordingStatus.value = RecordingStatus.Recording(0L)
 
-                // INÍCIO SEGURO DO SERVIÇO: startForeground DEPOIS do clique em Permitir
+                // INÍCIO SEGURO DO SERVIÇO: startForeground chamado 1 única vez após aprovação
                 startForegroundSafely(isPaused = false, elapsedText = "00:00")
                 startRecordingSession(resultCode, resultData)
             }
@@ -630,6 +651,7 @@ class ScreenRecordingService : Service() {
      */
     private fun startForegroundSafely(isPaused: Boolean, elapsedText: String) {
         val notification = buildNotification(isRecording = true, isPaused = isPaused, elapsedText = elapsedText)
+        lastNotifiedSignature = "true:$isPaused:${FloatingOverlayService.isBrushActive}:${FloatingOverlayService.isFacecamActive}"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -669,6 +691,7 @@ class ScreenRecordingService : Service() {
         elapsedText: String = formatDuration(recordedDurationMs),
         blinkPhase: Boolean = true
     ) {
+        lastNotifiedSignature = "$isRecording:$isPaused:${FloatingOverlayService.isBrushActive}:${FloatingOverlayService.isFacecamActive}"
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(
             NOTIFICATION_ID,
@@ -684,14 +707,6 @@ class ScreenRecordingService : Service() {
     private fun startRecordingSession(resultCode: Int, resultData: Intent) {
         isStopping.set(false)
         serviceScope.launch(Dispatchers.Default) {
-            val countdown = currentSettings.countdownSeconds
-            if (countdown > 0) {
-                for (i in countdown downTo 1) {
-                    _recordingStatus.value = RecordingStatus.Countdown(i)
-                    delay(1000)
-                }
-            }
-
             try {
                 calculateScreenDimensions()
 
@@ -760,16 +775,7 @@ class ScreenRecordingService : Service() {
 
                 recordedDurationMs = 0L
                 isPaused = false
-                chronometerBaseRealtime = SystemClock.elapsedRealtime()
                 _recordingStatus.value = RecordingStatus.Recording(0L)
-                if (countdown > 0) {
-                    updateRecordingNotification(
-                        isRecording = true,
-                        isPaused = false,
-                        elapsedText = "00:00",
-                        blinkPhase = true
-                    )
-                }
                 startTimer()
             } catch (e: Exception) {
                 Log.e(tag, "Erro ao iniciar sessão de gravação", e)
@@ -905,6 +911,9 @@ class ScreenRecordingService : Service() {
     private fun pauseRecording() {
         if (isPaused) return
         isPaused = true
+        if (chronometerBaseRealtime > 0L) {
+            recordedDurationMs = (SystemClock.elapsedRealtime() - chronometerBaseRealtime).coerceAtLeast(recordedDurationMs)
+        }
         videoEncoder?.pause()
         audioPipeline?.pause()
         _recordingStatus.value = RecordingStatus.Paused(recordedDurationMs)
@@ -921,6 +930,7 @@ class ScreenRecordingService : Service() {
     private fun resumeRecording() {
         if (!isPaused) return
         isPaused = false
+        chronometerBaseRealtime = SystemClock.elapsedRealtime() - recordedDurationMs
         videoEncoder?.resume()
         audioPipeline?.resume()
         _recordingStatus.value = RecordingStatus.Recording(recordedDurationMs)
@@ -995,13 +1005,14 @@ class ScreenRecordingService : Service() {
             } finally {
                 isStartingOrRecording = false
                 chronometerBaseRealtime = 0L
+                lastNotifiedSignature = null
                 _recordingStatus.value = RecordingStatus.Idle
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 if (dismissNotificationOnStop) {
                     cancelControlNotification(this@ScreenRecordingService)
                 } else {
                     // Mantém a barra de controle na notificação no estado PRONTO (00:00, botão Gravar visível)
-                    showOrUpdateControlNotification(this@ScreenRecordingService)
+                    showOrUpdateControlNotification(this@ScreenRecordingService, forceUpdate = true)
                 }
                 stopSelf()
             }
