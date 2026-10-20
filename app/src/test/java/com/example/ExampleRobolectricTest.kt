@@ -28,7 +28,7 @@ class ExampleRobolectricTest {
         assertEquals("com.example.action.PAUSE", ScreenRecordingService.ACTION_PAUSE)
         assertEquals("com.example.action.RESUME", ScreenRecordingService.ACTION_RESUME)
         assertEquals("com.example.action.STOP", ScreenRecordingService.ACTION_STOP)
-        assertEquals("dex_recorder_channel", ScreenRecordingService.CHANNEL_ID)
+        assertEquals("dex_recorder_control_channel_v2", ScreenRecordingService.CHANNEL_ID)
     }
 
     @Test
@@ -311,13 +311,17 @@ class ExampleRobolectricTest {
         assertEquals(android.view.View.VISIBLE, readyFacecamBtn.visibility)
         assertEquals(android.view.View.VISIBLE, readyCloseBtn.visibility)
 
-        // 5. Verifica Notification completa (contentView, bigContentView, setShowWhen=false, setWhen=0L)
+        // 5. Verifica Notification completa (contentView, bigContentView, setShowWhen=false, setWhen=0L, IMPORTANCE_DEFAULT)
         val notification = ScreenRecordingService.buildControlNotification(
             context = context,
             isRecording = true,
             isPaused = false,
             chronometerBase = base7s
         )
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channel = nm.getNotificationChannel(ScreenRecordingService.CHANNEL_ID)
+        assertNotNull(channel)
+        assertEquals(NotificationManager.IMPORTANCE_DEFAULT, channel.importance)
         @Suppress("DEPRECATION")
         assertNotNull(notification.contentView)
         @Suppress("DEPRECATION")

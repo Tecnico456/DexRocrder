@@ -15,17 +15,17 @@
     <LinearLayout
         android:id="@+id/notif_status_container"
         android:layout_width="wrap_content"
-        android:layout_height="32dp"
+        android:layout_height="30dp"
         android:background="@drawable/bg_dex_timer_pill"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingStart="7dp"
-        android:paddingEnd="7dp">
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp">
 
         <ImageView
             android:id="@+id/notif_status_dot"
-            android:layout_width="9dp"
-            android:layout_height="9dp"
+            android:layout_width="8dp"
+            android:layout_height="8dp"
             android:contentDescription="Status da Gravação"
             android:src="@drawable/dot_status_ready" />
 
@@ -33,12 +33,12 @@
             android:id="@+id/notif_chronometer"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="5dp"
+            android:layout_marginStart="4dp"
             android:fontFamily="monospace"
             android:singleLine="true"
             android:text="00:00"
             android:textColor="#FFFFFFFF"
-            android:textSize="12sp"
+            android:textSize="11sp"
             android:textStyle="bold" />
 
         <TextView
@@ -72,12 +72,12 @@
         <!-- 1. Botão Gravar (●): Visível quando !isRecording -->
         <ImageButton
             android:id="@+id/btn_notif_record"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginEnd="4dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginEnd="3dp"
             android:background="@drawable/bg_notif_btn_record"
             android:contentDescription="Iniciar Gravação"
-            android:padding="6dp"
+            android:padding="5dp"
             android:scaleType="centerInside"
             android:src="@drawable/ic_notif_record_dot"
             android:visibility="visible" />
@@ -85,12 +85,12 @@
         <!-- 2. Botão Dinâmico Pausar (||) ⇄ Continuar (▶): Visível quando isRecording == true -->
         <ImageButton
             android:id="@+id/btn_notif_pause_resume"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginEnd="4dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginEnd="3dp"
             android:background="@drawable/bg_notif_btn_circle"
             android:contentDescription="Pausar ou Continuar Gravação"
-            android:padding="6dp"
+            android:padding="5dp"
             android:scaleType="centerInside"
             android:src="@drawable/ic_notif_pause"
             android:visibility="gone" />
@@ -98,12 +98,12 @@
         <!-- 3. Botão Parar (■): Visível quando isRecording == true -->
         <ImageButton
             android:id="@+id/btn_notif_stop"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginEnd="4dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginEnd="3dp"
             android:background="@drawable/bg_notif_btn_stop"
             android:contentDescription="Parar Gravação"
-            android:padding="6dp"
+            android:padding="5dp"
             android:scaleType="centerInside"
             android:src="@drawable/ic_stop_square"
             android:visibility="gone" />
@@ -111,12 +111,12 @@
         <!-- 4. Botão Pincel / Desenho na tela -->
         <ImageButton
             android:id="@+id/btn_notif_brush"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginEnd="4dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginEnd="3dp"
             android:background="@drawable/bg_notif_btn_circle"
             android:contentDescription="Alternar Pincel"
-            android:padding="6dp"
+            android:padding="5dp"
             android:scaleType="centerInside"
             android:src="@drawable/ic_notif_brush"
             android:visibility="visible" />
@@ -124,12 +124,12 @@
         <!-- 5. Botão Câmera / Facecam -->
         <ImageButton
             android:id="@+id/btn_notif_facecam"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginEnd="4dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginEnd="3dp"
             android:background="@drawable/bg_notif_btn_circle"
             android:contentDescription="Alternar Facecam"
-            android:padding="6dp"
+            android:padding="5dp"
             android:scaleType="centerInside"
             android:src="@drawable/ic_notif_facecam"
             android:visibility="visible" />
@@ -137,11 +137,11 @@
         <!-- 6. Botão Fechar (X) -->
         <ImageButton
             android:id="@+id/btn_notif_close"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
             android:background="@drawable/bg_notif_btn_close"
             android:contentDescription="Fechar Controles"
-            android:padding="7dp"
+            android:padding="6dp"
             android:scaleType="centerInside"
             android:src="@drawable/ic_notif_close"
             android:visibility="visible" />

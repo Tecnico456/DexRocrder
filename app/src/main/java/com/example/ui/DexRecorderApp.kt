@@ -91,6 +91,7 @@ fun DexRecorderApp(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            ScreenRecordingService.prepareForRecordingStart()
             val serviceIntent = Intent(context, ScreenRecordingService::class.java).apply {
                 action = ScreenRecordingService.ACTION_START
                 putExtra(ScreenRecordingService.EXTRA_RESULT_CODE, result.resultCode)

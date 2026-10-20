@@ -73,7 +73,8 @@ import java.io.File
 class ScreenRecordingService : Service() {
 
     companion object {
-        const val CHANNEL_ID = "dex_recorder_channel"
+        private const val LEGACY_CHANNEL_ID = "dex_recorder_channel"
+        const val CHANNEL_ID = "dex_recorder_control_channel_v2"
         const val NOTIFICATION_ID = 1001
 
         const val ACTION_START = "com.example.action.START"
@@ -143,10 +144,15 @@ class ScreenRecordingService : Service() {
 
         fun ensureNotificationChannel(context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                try {
+                    manager.deleteNotificationChannel(LEGACY_CHANNEL_ID)
+                } catch (_: Exception) {}
+
                 val channel = NotificationChannel(
                     CHANNEL_ID,
                     "DexRecorder Controles e Gravação",
-                    NotificationManager.IMPORTANCE_LOW
+                    NotificationManager.IMPORTANCE_DEFAULT
                 ).apply {
                     description = "Barra de controle permanente para o Samsung DeX e gravação de tela"
                     enableVibration(false)
@@ -155,7 +161,6 @@ class ScreenRecordingService : Service() {
                     setSound(null, null)
                     lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 }
-                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 manager.createNotificationChannel(channel)
             }
         }
@@ -422,10 +427,12 @@ class ScreenRecordingService : Service() {
                 .setCustomHeadsUpContentView(headsUpRemoteViews)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
-                .setSilent(true)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setSound(null)
+                .setVibrate(null)
+                .setDefaults(0)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
@@ -655,7 +662,13 @@ class ScreenRecordingService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                val hasMicPerm = ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasMicPerm && currentSettings.audioMode != AudioCaptureMode.MUTE) {
+                    serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                }
             }
             startForeground(NOTIFICATION_ID, notification, serviceType)
         } else {

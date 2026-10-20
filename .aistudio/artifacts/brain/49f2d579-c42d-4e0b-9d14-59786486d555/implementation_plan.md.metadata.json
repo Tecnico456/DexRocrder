@@ -1,0 +1,6 @@
+{
+  "summary":  "Plano de correção definitiva para impedir que a notificação de controle no Samsung DeX seja minimizada ou colapsada em uma linha vazia ao iniciar a gravação, atualizando o canal para IMPORTANCE_DEFAULT (com novo ID para contornar o cache do Android), removendo flags de minimização silenciosa e garantindo inflação segura do RemoteViews.",
+  "updatedAt":  "2026-10-20T23:05:31.071050155Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
