@@ -290,21 +290,44 @@ class ExampleRobolectricTest {
         assertEquals(android.view.View.VISIBLE, pausedPauseResumeBtn.visibility)
         assertEquals("Continuar Gravação", pausedPauseResumeBtn.contentDescription.toString())
 
-        // 4. Verifica Notification completa (contentView, bigContentView, Ongoing e OnlyAlertOnce)
+        // 4. Simula o ciclo real do startTimer (reapply a cada segundo: 00:00 PRONTO -> 00:01 REC -> 00:07 REC)
+        val tick7Rv = ScreenRecordingService.buildCustomControlRemoteViews(
+            context = context,
+            isRecording = true,
+            isPaused = false,
+            elapsedText = "00:07",
+            isBrushActive = false,
+            isFacecamActive = false,
+            blinkPhase = false
+        )
+        tick7Rv.reapply(context, readyView)
+        assertEquals("00:07", readyTimer.text.toString())
+        assertEquals("REC", readyStatus.text.toString())
+        assertEquals(android.view.View.GONE, readyRecordBtn.visibility)
+        assertEquals(android.view.View.VISIBLE, readyPauseResumeBtn.visibility)
+        assertEquals(android.view.View.VISIBLE, readyStopBtn.visibility)
+        assertEquals(android.view.View.VISIBLE, readyBrushBtn.visibility)
+        assertEquals(android.view.View.VISIBLE, readyFacecamBtn.visibility)
+        assertEquals(android.view.View.VISIBLE, readyCloseBtn.visibility)
+
+        // 5. Verifica Notification completa (contentView, bigContentView distintos, sem texto simples "Tempo decorrido")
         val notification = ScreenRecordingService.buildControlNotification(
             context = context,
             isRecording = true,
             isPaused = false,
-            elapsedText = "02:10"
+            elapsedText = "00:07"
         )
         @Suppress("DEPRECATION")
         assertNotNull(notification.contentView)
         @Suppress("DEPRECATION")
         assertNotNull(notification.bigContentView)
+        assertEquals(null, notification.extras.getCharSequence(android.app.Notification.EXTRA_TITLE))
+        assertEquals(null, notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT))
         assertEquals(true, (notification.flags and android.app.Notification.FLAG_ONGOING_EVENT) != 0)
         assertEquals(true, (notification.flags and android.app.Notification.FLAG_ONLY_ALERT_ONCE) != 0)
     }
 }
+
 
 
 

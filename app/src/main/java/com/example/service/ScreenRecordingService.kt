@@ -330,8 +330,10 @@ class ScreenRecordingService : Service() {
         }
 
         /**
-         * Constrói a Notification completa com RemoteViews em CustomContentView, CustomBigContentView e CustomHeadsUpContentView
-         * para que a barra de controles fique visível imediatamente no painel do Samsung DeX mesmo recolhida/compacta.
+         * Constrói a Notification completa EXCLUSIVAMENTE com RemoteViews (notification_dex_controls.xml)
+         * em instâncias separadas para CustomContentView, CustomBigContentView e CustomHeadsUpContentView,
+         * com NotificationCompat.DecoratedCustomViewStyle() e SEM setContentTitle / setContentText
+         * para impedir que o Android 12+/Samsung One UI substitua os botões por texto simples durante a gravação.
          */
         fun buildControlNotification(
             context: Context,
@@ -344,7 +346,25 @@ class ScreenRecordingService : Service() {
         ): Notification {
             ensureNotificationChannel(context)
 
-            val remoteViews = buildCustomControlRemoteViews(
+            val collapsedRemoteViews = buildCustomControlRemoteViews(
+                context = context,
+                isRecording = isRecording,
+                isPaused = isPaused,
+                elapsedText = elapsedText,
+                isBrushActive = isBrushActive,
+                isFacecamActive = isFacecamActive,
+                blinkPhase = blinkPhase
+            )
+            val expandedRemoteViews = buildCustomControlRemoteViews(
+                context = context,
+                isRecording = isRecording,
+                isPaused = isPaused,
+                elapsedText = elapsedText,
+                isBrushActive = isBrushActive,
+                isFacecamActive = isFacecamActive,
+                blinkPhase = blinkPhase
+            )
+            val headsUpRemoteViews = buildCustomControlRemoteViews(
                 context = context,
                 isRecording = isRecording,
                 isPaused = isPaused,
@@ -364,27 +384,16 @@ class ScreenRecordingService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            val title = when {
-                isRecording && isPaused -> "DexRecorder • Pausado ($elapsedText)"
-                isRecording -> "DexRecorder • Gravando ($elapsedText)"
-                else -> "DexRecorder • Pronto para Gravar"
-            }
-            val content = when {
-                isRecording && isPaused -> "Gravação pausada em $elapsedText"
-                isRecording -> "Tempo decorrido: $elapsedText"
-                else -> "Toque nos controles para gravar, desenhar ou ativar Facecam"
-            }
-
             val builder = NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notification_rec)
-                .setContentTitle(title)
-                .setContentText(content)
+                .setStyle(NotificationCompat.DecoratedCustomViewStyle())
                 .setContentIntent(mainPendingIntent)
-                .setCustomContentView(remoteViews)
-                .setCustomBigContentView(remoteViews)
-                .setCustomHeadsUpContentView(remoteViews)
+                .setCustomContentView(collapsedRemoteViews)
+                .setCustomBigContentView(expandedRemoteViews)
+                .setCustomHeadsUpContentView(headsUpRemoteViews)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
+                .setSilent(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -397,7 +406,8 @@ class ScreenRecordingService : Service() {
         }
 
         /**
-         * Exibe ou atualiza imediatamente a barra de controle na notificação do sistema.
+         * Método unificado que exibe ou atualiza a barra de controle na notificação do sistema
+         * mantendo sempre o RemoteViews customizado (notification_dex_controls.xml) e seus botões.
          */
         fun showOrUpdateControlNotification(context: Context, blinkPhase: Boolean = true) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -522,6 +532,12 @@ class ScreenRecordingService : Service() {
                     return START_NOT_STICKY
                 }
 
+                // Atualiza imediatamente o estado para gravando antes do startForeground para que
+                // qualquer sincronização concorrente (MainActivity/FloatingOverlayService) mantenha os botões de gravação
+                recordedDurationMs = 0L
+                isPaused = false
+                _recordingStatus.value = RecordingStatus.Recording(0L)
+
                 // INÍCIO SEGURO DO SERVIÇO: startForeground DEPOIS do clique em Permitir
                 startForegroundSafely(isPaused = false, elapsedText = "00:00")
                 startRecordingSession(resultCode, resultData)
@@ -600,6 +616,23 @@ class ScreenRecordingService : Service() {
         )
     }
 
+    private fun updateRecordingNotification(
+        isRecording: Boolean = true,
+        isPaused: Boolean = this.isPaused,
+        elapsedText: String = formatDuration(recordedDurationMs),
+        blinkPhase: Boolean = true
+    ) {
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(
+            NOTIFICATION_ID,
+            buildNotification(
+                isRecording = isRecording,
+                isPaused = isPaused,
+                elapsedText = elapsedText,
+                blinkPhase = blinkPhase
+            )
+        )
+    }
 
     private fun startRecordingSession(resultCode: Int, resultData: Intent) {
         isStopping.set(false)
@@ -608,6 +641,12 @@ class ScreenRecordingService : Service() {
             if (countdown > 0) {
                 for (i in countdown downTo 1) {
                     _recordingStatus.value = RecordingStatus.Countdown(i)
+                    updateRecordingNotification(
+                        isRecording = true,
+                        isPaused = false,
+                        elapsedText = "00:00",
+                        blinkPhase = (i % 2 == 0)
+                    )
                     delay(1000)
                 }
             }
@@ -679,6 +718,12 @@ class ScreenRecordingService : Service() {
                 recordedDurationMs = 0L
                 isPaused = false
                 _recordingStatus.value = RecordingStatus.Recording(0L)
+                updateRecordingNotification(
+                    isRecording = true,
+                    isPaused = false,
+                    elapsedText = "00:00",
+                    blinkPhase = true
+                )
                 startTimer()
             } catch (e: Exception) {
                 Log.e(tag, "Erro ao iniciar sessão de gravação", e)
@@ -801,15 +846,11 @@ class ScreenRecordingService : Service() {
 
                     val formatted = formatDuration(recordedDurationMs)
                     val blinkPhase = ((recordedDurationMs / 1000L) % 2L == 0L)
-                    val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                    notificationManager.notify(
-                        NOTIFICATION_ID,
-                        buildNotification(
-                            isRecording = true,
-                            isPaused = false,
-                            elapsedText = formatted,
-                            blinkPhase = blinkPhase
-                        )
+                    updateRecordingNotification(
+                        isRecording = true,
+                        isPaused = false,
+                        elapsedText = formatted,
+                        blinkPhase = blinkPhase
                     )
                 }
             }
@@ -826,10 +867,10 @@ class ScreenRecordingService : Service() {
         _recordingStatus.value = RecordingStatus.Paused(recordedDurationMs)
 
         val formatted = formatDuration(recordedDurationMs)
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(
-            NOTIFICATION_ID,
-            buildNotification(isRecording = true, isPaused = true, elapsedText = formatted)
+        updateRecordingNotification(
+            isRecording = true,
+            isPaused = true,
+            elapsedText = formatted
         )
         Log.d(tag, "Gravação pausada com sucesso via notificação/controle.")
     }
@@ -842,10 +883,10 @@ class ScreenRecordingService : Service() {
         _recordingStatus.value = RecordingStatus.Recording(recordedDurationMs)
 
         val formatted = formatDuration(recordedDurationMs)
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(
-            NOTIFICATION_ID,
-            buildNotification(isRecording = true, isPaused = false, elapsedText = formatted)
+        updateRecordingNotification(
+            isRecording = true,
+            isPaused = false,
+            elapsedText = formatted
         )
         Log.d(tag, "Gravação retomada com sucesso via notificação/controle.")
     }
