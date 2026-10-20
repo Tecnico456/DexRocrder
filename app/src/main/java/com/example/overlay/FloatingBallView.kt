@@ -16,7 +16,7 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
-import com.example.MainActivity
+import com.example.R
 import com.example.model.RecordingStatus
 import com.example.service.ScreenRecordingService
 import kotlin.math.abs
@@ -26,6 +26,7 @@ import kotlin.math.hypot
 class FloatingBallView(
     context: Context,
     private val windowManager: WindowManager,
+    private val onStartRecording: () -> Unit,
     private val onToggleBrush: () -> Unit,
     private val onToggleFacecam: () -> Unit,
     private val onCloseBall: () -> Unit
@@ -61,15 +62,34 @@ class FloatingBallView(
     private val bubbleContainer = FrameLayout(context)
     private val bubbleIcon = ImageView(context)
     private val quickCloseBadge = TextView(context)
-    private val menuContainer = LinearLayout(context)
+    val menuContainer = LinearLayout(context)
 
-    // TAREFA 2: Alvo de fechamento ("X" dentro de um círculo vermelho) na parte inferior central da tela
+    // Action buttons in the expanded bar (TAREFA 1, 2 & 3)
+    lateinit var btnRecord: ImageButton
+        private set
+    lateinit var btnPauseResume: ImageButton
+        private set
+    lateinit var btnStop: ImageButton
+        private set
+    lateinit var btnBrush: ImageButton
+        private set
+    lateinit var btnFacecam: ImageButton
+        private set
+    lateinit var btnCloseBall: ImageButton
+        private set
+
+    // Alvo de fechamento ("X" dentro de um círculo vermelho) na parte inferior central da tela
     val closeTargetOverlay = LinearLayout(context)
     private val closeTargetCircle = FrameLayout(context)
     private var isCloseTargetAttached = false
 
     var isMenuExpanded = false
         private set
+    var isRecordingState = false
+        private set
+    var isPausedState = false
+        private set
+
     private var initialX = 0
     private var initialY = 0
     private var initialTouchX = 0f
@@ -80,6 +100,7 @@ class FloatingBallView(
         setupViews()
         setupCloseTargetView()
         setupTouch()
+        updateRecordingState(ScreenRecordingService.recordingStatus.value)
     }
 
     private fun setupViews() {
@@ -104,7 +125,7 @@ class FloatingBallView(
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         )
 
-        // TAREFA 1: Botão "X" direto ao lado/topo da bola flutuante para fechar com 1 toque
+        // Botão "X" direto ao lado/topo da bola flutuante para fechar com 1 toque
         val badgeBg = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(0xFF1E1B2E.toInt())
@@ -141,10 +162,16 @@ class FloatingBallView(
         menuContainer.setPadding(dpToPx(8), dpToPx(4), dpToPx(8), dpToPx(4))
         menuContainer.visibility = View.GONE
 
-        // Actions: Pause/Resume, Stop Recording, Brush, Facecam, Open App, and Close Ball ("X")
-        val btnPauseResume = createActionButton(
+        // 1. Botão de Gravar (Record) - visível quando !isRecording
+        btnRecord = createRecordButton {
+            onStartRecording()
+            collapseMenu()
+        }
+
+        // 2. Botão Dinâmico de Pausar / Continuar (Pause ⇄ Resume) - ativo quando isRecording == true
+        btnPauseResume = createActionButton(
             iconRes = android.R.drawable.ic_media_pause,
-            contentDesc = "Pausar ou Continuar Gravação"
+            contentDesc = "Pausar Gravação"
         ) {
             val status = ScreenRecordingService.recordingStatus.value
             val intent = Intent(context, ScreenRecordingService::class.java).apply {
@@ -155,13 +182,10 @@ class FloatingBallView(
                 }
             }
             context.startService(intent)
-            collapseMenu()
         }
 
-        val btnStop = createActionButton(
-            iconRes = android.R.drawable.ic_media_rew,
-            contentDesc = "Parar Gravação"
-        ) {
+        // 3. Botão de Parar (Stop) - quadrado de Stop, ativo quando isRecording == true
+        btnStop = createStopButton {
             val intent = Intent(context, ScreenRecordingService::class.java).apply {
                 action = ScreenRecordingService.ACTION_STOP
             }
@@ -169,7 +193,8 @@ class FloatingBallView(
             collapseMenu()
         }
 
-        val btnBrush = createActionButton(
+        // 4. Pincel / Desenho na tela (Edit / Brush)
+        btnBrush = createActionButton(
             iconRes = android.R.drawable.ic_menu_edit,
             contentDesc = "Pincel na Tela"
         ) {
@@ -177,7 +202,8 @@ class FloatingBallView(
             collapseMenu()
         }
 
-        val btnFacecam = createActionButton(
+        // 5. Câmera / Facecam (Camera)
+        btnFacecam = createActionButton(
             iconRes = android.R.drawable.ic_menu_camera,
             contentDesc = "Facecam"
         ) {
@@ -185,28 +211,18 @@ class FloatingBallView(
             collapseMenu()
         }
 
-        val btnHome = createActionButton(
-            iconRes = android.R.drawable.ic_menu_compass,
-            contentDesc = "Abrir DexRecorder"
-        ) {
-            val intent = Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            }
-            context.startActivity(intent)
-            collapseMenu()
-        }
-
-        // TAREFA 1: Botão claro "X" (Fechar / Ocultar Bola Flutuante) ao expandir as opções
-        val btnCloseBall = createCloseMenuButton {
+        // 6. Fechar Balão Flutuante (Close / X vermelho)
+        btnCloseBall = createCloseMenuButton {
             collapseMenu()
             onCloseBall()
         }
 
+        // TAREFA 1 & 3: Apenas os botões necessários (sem FastRewind/<< e sem Crosshair/Compass)
+        menuContainer.addView(btnRecord)
         menuContainer.addView(btnPauseResume)
         menuContainer.addView(btnStop)
         menuContainer.addView(btnBrush)
         menuContainer.addView(btnFacecam)
-        menuContainer.addView(btnHome)
         menuContainer.addView(btnCloseBall)
 
         val rootRow = LinearLayout(context).apply {
@@ -220,7 +236,53 @@ class FloatingBallView(
     }
 
     /**
-     * TAREFA 2: Configura o alvo de fechamento (ícone "X" dentro de um círculo vermelho)
+     * TAREFA 2: Atualiza dinamicamente os botões de Gravar, Pausar/Continuar e Parar
+     * em tempo real de acordo com o estado do ScreenRecordingService.
+     */
+    fun updateRecordingState(status: RecordingStatus) {
+        val activeRecording = status is RecordingStatus.Recording ||
+            status is RecordingStatus.Paused ||
+            status is RecordingStatus.Countdown
+        val paused = status is RecordingStatus.Paused
+
+        isRecordingState = activeRecording
+        isPausedState = paused
+
+        if (!activeRecording) {
+            // Não está gravando: exibe botão Gravar (Record) e oculta Pausar/Continuar e Parar
+            btnRecord.visibility = View.VISIBLE
+            btnPauseResume.visibility = View.GONE
+            btnStop.visibility = View.GONE
+        } else {
+            // Está gravando (ou pausado): oculta botão Gravar e exibe Pausar/Continuar + Parar
+            btnRecord.visibility = View.GONE
+            btnPauseResume.visibility = View.VISIBLE
+            btnStop.visibility = View.VISIBLE
+
+            if (paused) {
+                // Enquanto estiver pausado (isPaused): exibe ícone Play ("Continuar")
+                btnPauseResume.setImageResource(android.R.drawable.ic_media_play)
+                btnPauseResume.setColorFilter(0xFF00E676.toInt()) // Verde destaque para retomar
+                btnPauseResume.contentDescription = "Continuar Gravação"
+            } else {
+                // Enquanto estiver gravando (!isPaused): exibe ícone Pause ("Pausar")
+                btnPauseResume.setImageResource(android.R.drawable.ic_media_pause)
+                btnPauseResume.setColorFilter(Color.WHITE)
+                btnPauseResume.contentDescription = "Pausar Gravação"
+            }
+        }
+    }
+
+    /**
+     * Sincroniza o destaque visual dos botões Pincel e Facecam entre o Balão Flutuante e a Notificação.
+     */
+    fun updateToolStates(brushActive: Boolean, facecamActive: Boolean) {
+        btnBrush.setColorFilter(if (brushActive) 0xFF00E5FF.toInt() else Color.WHITE)
+        btnFacecam.setColorFilter(if (facecamActive) 0xFF00E5FF.toInt() else Color.WHITE)
+    }
+
+    /**
+     * Configura o alvo de fechamento (ícone "X" dentro de um círculo vermelho)
      * exibido na parte inferior central da tela durante o arraste.
      */
     private fun setupCloseTargetView() {
@@ -258,6 +320,52 @@ class FloatingBallView(
 
         closeTargetOverlay.addView(closeTargetCircle)
         closeTargetOverlay.addView(label)
+    }
+
+    private fun createRecordButton(onClick: () -> Unit): ImageButton {
+        val recRingBg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0x33FF1744)
+            setStroke(dpToPx(1), 0xFFFF5252.toInt())
+        }
+        return ImageButton(context).apply {
+            setImageResource(R.drawable.ic_notification_rec)
+            background = recRingBg
+            setColorFilter(0xFFFF1744.toInt()) // Círculo vermelho de gravação
+            contentDescription = "Iniciar Gravação"
+            val size = dpToPx(38)
+            val lp = LinearLayout.LayoutParams(size, size).apply {
+                leftMargin = dpToPx(4)
+                rightMargin = dpToPx(4)
+            }
+            layoutParams = lp
+            val pad = dpToPx(8)
+            setPadding(pad, pad, pad, pad)
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun createStopButton(onClick: () -> Unit): ImageButton {
+        val stopBg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0x33FF5252)
+            setStroke(dpToPx(1), 0xFFFF5252.toInt())
+        }
+        return ImageButton(context).apply {
+            setImageResource(R.drawable.ic_stop_square)
+            background = stopBg
+            setColorFilter(0xFFFF5252.toInt())
+            contentDescription = "Parar Gravação"
+            val size = dpToPx(38)
+            val lp = LinearLayout.LayoutParams(size, size).apply {
+                leftMargin = dpToPx(4)
+                rightMargin = dpToPx(4)
+            }
+            layoutParams = lp
+            val pad = dpToPx(8)
+            setPadding(pad, pad, pad, pad)
+            setOnClickListener { onClick() }
+        }
     }
 
     private fun createActionButton(
@@ -400,6 +508,9 @@ class FloatingBallView(
 
     fun toggleMenu() {
         isMenuExpanded = !isMenuExpanded
+        if (isMenuExpanded) {
+            updateRecordingState(ScreenRecordingService.recordingStatus.value)
+        }
         menuContainer.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
     }
 
@@ -417,4 +528,5 @@ class FloatingBallView(
         return (dp * scale + 0.5f).toInt()
     }
 }
+
 

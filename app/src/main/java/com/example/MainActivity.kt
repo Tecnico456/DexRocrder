@@ -42,16 +42,25 @@ import com.example.viewmodel.MainViewModel
  */
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        const val ACTION_START_RECORDING_FROM_OVERLAY = "com.example.action.START_RECORDING_FROM_OVERLAY"
+        const val EXTRA_AUTO_START_RECORDING = "extra_auto_start_recording"
+    }
+
     private val tag = "MainActivity"
     private val viewModel: MainViewModel by viewModels()
 
     // Flag para distinguir solicitação inicial de permissão vs clique explícito em Iniciar Gravação
     private var pendingRecordingAfterPermissions = false
 
-    // 1. Launcher para permissões de runtime (POST_NOTIFICATIONS, RECORD_AUDIO, etc.)
+    // Flag para minimizar a janela automaticamente quando a gravação ou ferramenta é acionada pelo Balão Flutuante / Notificação DeX
+    private var minimizeAfterCaptureApproval = false
+    private var pendingOverlayToolAction: String? = null
+
+    // 1. Launcher para permissões de runtime (POST_NOTIFICATIONS, RECORD_AUDIO, CAMERA)
     private lateinit var runtimePermissionsLauncher: ActivityResultLauncher<Array<String>>
 
-    // Launcher para SYSTEM_ALERT_WINDOW (overlay para bola flutuante e pincel)
+    // Launcher para SYSTEM_ALERT_WINDOW (overlay para bola flutuante, pincel e facecam)
     private lateinit var overlayPermissionLauncher: ActivityResultLauncher<Intent>
 
     // 2. Launcher para Intent de Captura de Tela (MediaProjection)
@@ -64,26 +73,105 @@ class MainActivity : ComponentActivity() {
         // Registra launchers no ciclo de vida da Activity antes do onStart
         setupActivityResultLaunchers()
 
-        // Solicita permissões de runtime essenciais na inicialização da Activity
-        requestInitialRuntimePermissions()
+        // Exibe imediatamente a Barra de Controle na Notificação (estado PRONTO 00:00) se já possuir permissão
+        ScreenRecordingService.showOrUpdateControlNotification(this)
+
+        val triggeredFromExternalControl = isExternalControlIntent(intent)
+        if (!triggeredFromExternalControl) {
+            // Solicita permissões de runtime essenciais na inicialização da Activity
+            requestInitialRuntimePermissions()
+        }
 
         // TAREFA 3: Bola Flutuante ativa automaticamente ao iniciar o App
         ensureFloatingBallStartedOnLaunch()
+
+        if (triggeredFromExternalControl) {
+            handleExternalControlIntent(intent)
+        }
 
         setContent {
             MyApplicationTheme {
                 DexRecorderApp(
                     viewModel = viewModel,
-                    onRequestStartRecording = { startRecordingWorkflow() },
+                    onRequestStartRecording = {
+                        minimizeAfterCaptureApproval = false
+                        startRecordingWorkflow()
+                    },
                     onRequestOverlayPermission = { requestOverlayPermission() }
                 )
             }
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleExternalControlIntent(intent)
+    }
+
+    private fun isExternalControlIntent(intent: Intent?): Boolean {
+        if (intent == null) return false
+        return intent.action == ACTION_START_RECORDING_FROM_OVERLAY ||
+            intent.action == FloatingOverlayService.ACTION_TOGGLE_BRUSH ||
+            intent.action == FloatingOverlayService.ACTION_TOGGLE_FACECAM ||
+            intent.getBooleanExtra(EXTRA_AUTO_START_RECORDING, false)
+    }
+
+    private fun handleExternalControlIntent(intent: Intent?) {
+        if (intent == null) return
+
+        when {
+            intent.action == ACTION_START_RECORDING_FROM_OVERLAY ||
+                intent.getBooleanExtra(EXTRA_AUTO_START_RECORDING, false) -> {
+                intent.removeExtra(EXTRA_AUTO_START_RECORDING)
+                intent.action = Intent.ACTION_MAIN
+                minimizeAfterCaptureApproval = true
+                startRecordingWorkflow()
+            }
+            intent.action == FloatingOverlayService.ACTION_TOGGLE_BRUSH ||
+                intent.action == FloatingOverlayService.ACTION_TOGGLE_FACECAM -> {
+                val toolAction = intent.action!!
+                intent.action = Intent.ACTION_MAIN
+                handleExternalToolToggle(toolAction)
+            }
+        }
+    }
+
+    private fun handleExternalToolToggle(toolAction: String) {
+        if (!Settings.canDrawOverlays(this)) {
+            pendingOverlayToolAction = toolAction
+            try {
+                val overlayIntent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+                overlayPermissionLauncher.launch(overlayIntent)
+            } catch (e: Exception) {
+                Log.w(tag, "Erro ao solicitar permissão de sobreposição para ferramenta", e)
+            }
+            return
+        }
+
+        if (toolAction == FloatingOverlayService.ACTION_TOGGLE_FACECAM &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingOverlayToolAction = toolAction
+            runtimePermissionsLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+            return
+        }
+
+        val serviceIntent = Intent(this, FloatingOverlayService::class.java).apply {
+            action = toolAction
+        }
+        startService(serviceIntent)
+        moveTaskToBack(true)
+    }
+
     override fun onResume() {
         super.onResume()
-        // TAREFA 3: Caso o usuário retorne da tela de permissão de sobreposição com ela aceita,
+        // Garante que a Barra de Controle na Notificação esteja sempre atualizada e visível
+        ScreenRecordingService.showOrUpdateControlNotification(this)
+        // Caso o usuário retorne da tela de permissão de sobreposição com ela aceita,
         // inicia a bola flutuante automaticamente se a opção estiver ativa.
         if (viewModel.settings.value.showFloatingBall && Settings.canDrawOverlays(this)) {
             startFloatingBallService()
@@ -101,8 +189,27 @@ class MainActivity : ComponentActivity() {
             } else {
                 true
             }
+            val cameraGranted = permissions[Manifest.permission.CAMERA] ?: (
+                ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+            )
 
-            Log.d(tag, "Permissões concedidas: Áudio=$audioGranted, Notificações=$notificationsGranted")
+            Log.d(tag, "Permissões concedidas: Áudio=$audioGranted, Notificações=$notificationsGranted, Câmera=$cameraGranted")
+
+            if (notificationsGranted) {
+                ScreenRecordingService.showOrUpdateControlNotification(this)
+            }
+
+            val toolAction = pendingOverlayToolAction
+            if (toolAction != null) {
+                pendingOverlayToolAction = null
+                if (toolAction == FloatingOverlayService.ACTION_TOGGLE_FACECAM && cameraGranted && Settings.canDrawOverlays(this)) {
+                    val serviceIntent = Intent(this, FloatingOverlayService::class.java).apply {
+                        action = toolAction
+                    }
+                    startService(serviceIntent)
+                    moveTaskToBack(true)
+                }
+            }
 
             // Se foi acionado pelo botão de gravação, avança para a captura de tela
             if (pendingRecordingAfterPermissions) {
@@ -117,11 +224,16 @@ class MainActivity : ComponentActivity() {
         ) {
             if (Settings.canDrawOverlays(this)) {
                 Toast.makeText(this, "Permissão de sobreposição concedida!", Toast.LENGTH_SHORT).show()
-                // TAREFA 3: Inicia a bola flutuante imediatamente após o usuário retornar com a permissão aceita
                 if (viewModel.settings.value.showFloatingBall) {
                     startFloatingBallService()
                 }
+                val toolAction = pendingOverlayToolAction
+                if (toolAction != null) {
+                    pendingOverlayToolAction = null
+                    handleExternalToolToggle(toolAction)
+                }
             } else {
+                pendingOverlayToolAction = null
                 Toast.makeText(this, "Permissão de sobreposição necessária para ferramentas flutuantes.", Toast.LENGTH_SHORT).show()
             }
         }
@@ -132,15 +244,24 @@ class MainActivity : ComponentActivity() {
         ) { result ->
             // PASSO 3: INÍCIO SEGURO DO SERVIÇO
             // Só chamamos startForegroundService DEPOIS que o usuário aprovar o pop-up
+            val shouldMinimize = minimizeAfterCaptureApproval
+            minimizeAfterCaptureApproval = false
             if (result.resultCode == Activity.RESULT_OK && result.data != null) {
                 Log.d(tag, "Usuário autorizou captura de tela. Iniciando Foreground Service de forma segura.")
                 startSafeRecordingService(result.resultCode, result.data!!)
+                if (shouldMinimize) {
+                    moveTaskToBack(true)
+                }
             } else {
                 Log.w(tag, "Usuário recusou ou cancelou o pop-up de captura de tela.")
                 Toast.makeText(this, "Captura de tela cancelada pelo usuário.", Toast.LENGTH_SHORT).show()
+                if (shouldMinimize) {
+                    moveTaskToBack(true)
+                }
             }
         }
     }
+
 
     /**
      * TAREFA 3: Verifica se a configuração da Bola Flutuante está ativa na abertura do App.

@@ -148,18 +148,55 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify FloatingBallView close button, drag-to-close target, and FloatingOverlayService onTaskRemoved`() {
+    fun `verify FloatingBallView clean action buttons, dynamic recording state, drag-to-close target, and FloatingOverlayService onTaskRemoved`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
 
+        var startRecordingTriggered = false
         var closeCallbackTriggered = false
         val ballView = com.example.overlay.FloatingBallView(
             context = context,
             windowManager = wm,
+            onStartRecording = { startRecordingTriggered = true },
             onToggleBrush = {},
             onToggleFacecam = {},
             onCloseBall = { closeCallbackTriggered = true }
         )
+
+        // TAREFA 1 & 3: Verify only 6 buttons exist in menuContainer:
+        // Record, Pause/Resume, Stop, Brush, Facecam, Close (no FastRewind or Crosshair)
+        assertEquals(6, ballView.menuContainer.childCount)
+
+        // TAREFA 2: When Idle (!isRecording), Record button is visible, Pause/Resume and Stop are GONE
+        ballView.updateRecordingState(com.example.model.RecordingStatus.Idle)
+        assertEquals(false, ballView.isRecordingState)
+        assertEquals(false, ballView.isPausedState)
+        assertEquals(android.view.View.VISIBLE, ballView.btnRecord.visibility)
+        assertEquals(android.view.View.GONE, ballView.btnPauseResume.visibility)
+        assertEquals(android.view.View.GONE, ballView.btnStop.visibility)
+
+        // Clicking Record button triggers start recording callback
+        ballView.btnRecord.performClick()
+        assertEquals(true, startRecordingTriggered)
+
+        // When Recording (!isPaused), Record is GONE, Pause/Resume ("Pausar Gravação") and Stop are VISIBLE
+        ballView.updateRecordingState(com.example.model.RecordingStatus.Recording(5000L))
+        assertEquals(true, ballView.isRecordingState)
+        assertEquals(false, ballView.isPausedState)
+        assertEquals(android.view.View.GONE, ballView.btnRecord.visibility)
+        assertEquals(android.view.View.VISIBLE, ballView.btnPauseResume.visibility)
+        assertEquals(android.view.View.VISIBLE, ballView.btnStop.visibility)
+        assertEquals("Pausar Gravação", ballView.btnPauseResume.contentDescription)
+        assertEquals("Parar Gravação", ballView.btnStop.contentDescription)
+
+        // When Paused (isPaused), Pause/Resume switches dynamically to Resume ("Continuar Gravação")
+        ballView.updateRecordingState(com.example.model.RecordingStatus.Paused(5000L))
+        assertEquals(true, ballView.isRecordingState)
+        assertEquals(true, ballView.isPausedState)
+        assertEquals(android.view.View.GONE, ballView.btnRecord.visibility)
+        assertEquals(android.view.View.VISIBLE, ballView.btnPauseResume.visibility)
+        assertEquals(android.view.View.VISIBLE, ballView.btnStop.visibility)
+        assertEquals("Continuar Gravação", ballView.btnPauseResume.contentDescription)
 
         // Verify menu expands on toggleMenu()
         assertEquals(false, ballView.isMenuExpanded)
@@ -180,5 +217,94 @@ class ExampleRobolectricTest {
         assertNotNull(ballView.closeTargetOverlay)
         assertEquals(false, closeCallbackTriggered)
     }
+
+    @Test
+    fun `verify Samsung DeX Notification RemoteViews layout, real-time timer, and dynamic button states`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val parent = android.widget.FrameLayout(context)
+
+        // 1. Estado PRONTO (!isRecording)
+        val readyRv = ScreenRecordingService.buildCustomControlRemoteViews(
+            context = context,
+            isRecording = false,
+            isPaused = false,
+            elapsedText = "00:00",
+            isBrushActive = false,
+            isFacecamActive = false
+        )
+        val readyView = readyRv.apply(context, parent)
+        val readyTimer = readyView.findViewById<android.widget.TextView>(R.id.notif_timer_text)
+        val readyStatus = readyView.findViewById<android.widget.TextView>(R.id.notif_status_label)
+        val readyRecordBtn = readyView.findViewById<android.widget.ImageButton>(R.id.btn_notif_record)
+        val readyPauseResumeBtn = readyView.findViewById<android.widget.ImageButton>(R.id.btn_notif_pause_resume)
+        val readyStopBtn = readyView.findViewById<android.widget.ImageButton>(R.id.btn_notif_stop)
+        val readyBrushBtn = readyView.findViewById<android.widget.ImageButton>(R.id.btn_notif_brush)
+        val readyFacecamBtn = readyView.findViewById<android.widget.ImageButton>(R.id.btn_notif_facecam)
+        val readyCloseBtn = readyView.findViewById<android.widget.ImageButton>(R.id.btn_notif_close)
+
+        assertEquals("00:00", readyTimer.text.toString())
+        assertEquals("PRONTO", readyStatus.text.toString())
+        assertEquals(android.view.View.VISIBLE, readyRecordBtn.visibility)
+        assertEquals(android.view.View.GONE, readyPauseResumeBtn.visibility)
+        assertEquals(android.view.View.GONE, readyStopBtn.visibility)
+        assertEquals(android.view.View.VISIBLE, readyBrushBtn.visibility)
+        assertEquals(android.view.View.VISIBLE, readyFacecamBtn.visibility)
+        assertEquals(android.view.View.VISIBLE, readyCloseBtn.visibility)
+
+        // 2. Estado GRAVANDO (isRecording = true, isPaused = false)
+        val recRv = ScreenRecordingService.buildCustomControlRemoteViews(
+            context = context,
+            isRecording = true,
+            isPaused = false,
+            elapsedText = "01:45",
+            isBrushActive = true,
+            isFacecamActive = false
+        )
+        val recView = recRv.apply(context, parent)
+        val recTimer = recView.findViewById<android.widget.TextView>(R.id.notif_timer_text)
+        val recStatus = recView.findViewById<android.widget.TextView>(R.id.notif_status_label)
+        val recRecordBtn = recView.findViewById<android.widget.ImageButton>(R.id.btn_notif_record)
+        val recPauseResumeBtn = recView.findViewById<android.widget.ImageButton>(R.id.btn_notif_pause_resume)
+        val recStopBtn = recView.findViewById<android.widget.ImageButton>(R.id.btn_notif_stop)
+
+        assertEquals("01:45", recTimer.text.toString())
+        assertEquals("REC", recStatus.text.toString())
+        assertEquals(android.view.View.GONE, recRecordBtn.visibility)
+        assertEquals(android.view.View.VISIBLE, recPauseResumeBtn.visibility)
+        assertEquals(android.view.View.VISIBLE, recStopBtn.visibility)
+        assertEquals("Pausar Gravação", recPauseResumeBtn.contentDescription.toString())
+
+        // 3. Estado PAUSADO (isRecording = true, isPaused = true)
+        val pausedRv = ScreenRecordingService.buildCustomControlRemoteViews(
+            context = context,
+            isRecording = true,
+            isPaused = true,
+            elapsedText = "01:45",
+            isBrushActive = false,
+            isFacecamActive = true
+        )
+        val pausedView = pausedRv.apply(context, parent)
+        val pausedStatus = pausedView.findViewById<android.widget.TextView>(R.id.notif_status_label)
+        val pausedPauseResumeBtn = pausedView.findViewById<android.widget.ImageButton>(R.id.btn_notif_pause_resume)
+        assertEquals("PAUSADO", pausedStatus.text.toString())
+        assertEquals(android.view.View.VISIBLE, pausedPauseResumeBtn.visibility)
+        assertEquals("Continuar Gravação", pausedPauseResumeBtn.contentDescription.toString())
+
+        // 4. Verifica Notification completa (contentView, bigContentView, Ongoing e OnlyAlertOnce)
+        val notification = ScreenRecordingService.buildControlNotification(
+            context = context,
+            isRecording = true,
+            isPaused = false,
+            elapsedText = "02:10"
+        )
+        @Suppress("DEPRECATION")
+        assertNotNull(notification.contentView)
+        @Suppress("DEPRECATION")
+        assertNotNull(notification.bigContentView)
+        assertEquals(true, (notification.flags and android.app.Notification.FLAG_ONGOING_EVENT) != 0)
+        assertEquals(true, (notification.flags and android.app.Notification.FLAG_ONLY_ALERT_ONCE) != 0)
+    }
 }
+
+
 

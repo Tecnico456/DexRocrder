@@ -22,11 +22,14 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
 import android.view.Surface
+import android.view.View
 import android.view.WindowManager
+import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.DexRecorderApplication
@@ -56,13 +59,15 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Foreground Service for Screen Recording with MediaProjection.
+ * Foreground Service for Screen Recording with MediaProjection and Samsung DeX Notification Control Bar.
  * Adheres strictly to Android 14 (API 34+) requirements:
  * 1. startForeground() is invoked with FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
  *    immediately upon start with valid MediaProjection authorization.
  * 2. MediaProjection callback is registered.
  * 3. Notification channel is configured with IMPORTANCE_LOW.
- * 4. Ongoing notification includes action buttons for Pause, Resume, and Stop & Close.
+ * 4. Ongoing custom RemoteViews notification (notification_dex_controls.xml) displays real-time timer,
+ *    status indicator dot, and full control buttons (Record, Pause/Resume, Stop, Brush, Facecam, Close)
+ *    synchronized with the Floating Ball even in the collapsed notification state.
  */
 class ScreenRecordingService : Service() {
 
@@ -74,6 +79,9 @@ class ScreenRecordingService : Service() {
         const val ACTION_PAUSE = "com.example.action.PAUSE"
         const val ACTION_RESUME = "com.example.action.RESUME"
         const val ACTION_STOP = "com.example.action.STOP"
+        const val ACTION_CLOSE_NOTIFICATION = "com.example.action.CLOSE_NOTIFICATION"
+        const val ACTION_TOGGLE_BRUSH_FROM_NOTIF = "com.example.action.NOTIF_TOGGLE_BRUSH"
+        const val ACTION_TOGGLE_FACECAM_FROM_NOTIF = "com.example.action.NOTIF_TOGGLE_FACECAM"
 
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
@@ -85,8 +93,7 @@ class ScreenRecordingService : Service() {
         var currentSettings = RecordingSettings()
 
         /**
-         * TAREFA 1: Identificar se o DeX está ativo.
-         * Verifique se o dispositivo está em modo Desktop:
+         * Identificar se o Samsung DeX está ativo.
          */
         fun isDeXMode(context: Context): Boolean {
             val uiModeManager = context.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
@@ -99,6 +106,334 @@ class ScreenRecordingService : Service() {
                 false
             }
             return isDeskMode || isSemDesk
+        }
+
+        fun formatDurationStatic(durationMs: Long): String {
+            val seconds = (durationMs / 1000) % 60
+            val minutes = (durationMs / (1000 * 60)) % 60
+            val hours = durationMs / (1000 * 60 * 60)
+            return if (hours > 0) {
+                String.format("%02d:%02d:%02d", hours, minutes, seconds)
+            } else {
+                String.format("%02d:%02d", minutes, seconds)
+            }
+        }
+
+        fun ensureNotificationChannel(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "DexRecorder Controles e Gravação",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Barra de controle permanente para o Samsung DeX e gravação de tela"
+                    enableVibration(false)
+                    enableLights(false)
+                    setShowBadge(false)
+                    setSound(null, null)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                }
+                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                manager.createNotificationChannel(channel)
+            }
+        }
+
+        /**
+         * TAREFA 1, 2 & 3: Constrói o RemoteViews customizado (res/layout/notification_dex_controls.xml)
+         * sincronizado com o estado de gravação (isRecording, isPaused, elapsedText) e com as ferramentas
+         * do Balão Flutuante (Pincel e Facecam).
+         */
+        fun buildCustomControlRemoteViews(
+            context: Context,
+            isRecording: Boolean,
+            isPaused: Boolean,
+            elapsedText: String,
+            isBrushActive: Boolean = FloatingOverlayService.isBrushActive,
+            isFacecamActive: Boolean = FloatingOverlayService.isFacecamActive,
+            blinkPhase: Boolean = true
+        ): RemoteViews {
+            val remoteViews = RemoteViews(context.packageName, R.layout.notification_dex_controls)
+
+            // 1. Indicador de Status e Tempo (Ponto colorido + Cronômetro 00:00 + Rótulo)
+            when {
+                isRecording && !isPaused -> {
+                    val dotRes = if (blinkPhase) R.drawable.dot_status_recording else R.drawable.dot_status_recording_dim
+                    remoteViews.setImageViewResource(R.id.notif_status_dot, dotRes)
+                    remoteViews.setTextViewText(R.id.notif_timer_text, elapsedText)
+                    remoteViews.setTextViewText(R.id.notif_status_label, "REC")
+                    remoteViews.setTextColor(R.id.notif_status_label, 0xFFFF5252.toInt())
+                }
+                isRecording && isPaused -> {
+                    remoteViews.setImageViewResource(R.id.notif_status_dot, R.drawable.dot_status_paused)
+                    remoteViews.setTextViewText(R.id.notif_timer_text, elapsedText)
+                    remoteViews.setTextViewText(R.id.notif_status_label, "PAUSADO")
+                    remoteViews.setTextColor(R.id.notif_status_label, 0xFFFFC400.toInt())
+                }
+                else -> {
+                    remoteViews.setImageViewResource(R.id.notif_status_dot, R.drawable.dot_status_ready)
+                    remoteViews.setTextViewText(R.id.notif_timer_text, "00:00")
+                    remoteViews.setTextViewText(R.id.notif_status_label, "PRONTO")
+                    remoteViews.setTextColor(R.id.notif_status_label, 0xFF00E676.toInt())
+                }
+            }
+
+            // 2. Visibilidade Dinâmica dos Botões de Gravação (Record vs Pause/Resume + Stop)
+            if (!isRecording) {
+                remoteViews.setViewVisibility(R.id.btn_notif_record, View.VISIBLE)
+                remoteViews.setViewVisibility(R.id.btn_notif_pause_resume, View.GONE)
+                remoteViews.setViewVisibility(R.id.btn_notif_stop, View.GONE)
+            } else {
+                remoteViews.setViewVisibility(R.id.btn_notif_record, View.GONE)
+                remoteViews.setViewVisibility(R.id.btn_notif_pause_resume, View.VISIBLE)
+                remoteViews.setViewVisibility(R.id.btn_notif_stop, View.VISIBLE)
+
+                if (isPaused) {
+                    remoteViews.setImageViewResource(R.id.btn_notif_pause_resume, R.drawable.ic_notif_play)
+                    remoteViews.setContentDescription(R.id.btn_notif_pause_resume, "Continuar Gravação")
+                } else {
+                    remoteViews.setImageViewResource(R.id.btn_notif_pause_resume, R.drawable.ic_notif_pause)
+                    remoteViews.setContentDescription(R.id.btn_notif_pause_resume, "Pausar Gravação")
+                }
+            }
+
+            // 3. Destaque visual das ferramentas Pincel e Facecam
+            remoteViews.setInt(
+                R.id.btn_notif_brush,
+                "setBackgroundResource",
+                if (isBrushActive) R.drawable.bg_notif_btn_active else R.drawable.bg_notif_btn_circle
+            )
+            remoteViews.setInt(
+                R.id.btn_notif_facecam,
+                "setBackgroundResource",
+                if (isFacecamActive) R.drawable.bg_notif_btn_active else R.drawable.bg_notif_btn_circle
+            )
+
+            // 4. Configuração de PendingIntents para cada botão de ação
+            val mainIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val mainPendingIntent = PendingIntent.getActivity(
+                context,
+                200,
+                mainIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            remoteViews.setOnClickPendingIntent(R.id.notif_status_container, mainPendingIntent)
+
+            // Botão Gravar (●): Inicia a gravação via fluxo seguro do MediaProjection na MainActivity
+            val recordIntent = Intent(context, MainActivity::class.java).apply {
+                action = MainActivity.ACTION_START_RECORDING_FROM_OVERLAY
+                putExtra(MainActivity.EXTRA_AUTO_START_RECORDING, true)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val recordPendingIntent = PendingIntent.getActivity(
+                context,
+                201,
+                recordIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            remoteViews.setOnClickPendingIntent(R.id.btn_notif_record, recordPendingIntent)
+
+            // Botão Dinâmico Pausar (||) ⇄ Continuar (▶)
+            val pauseOrResumeAction = if (isPaused) ACTION_RESUME else ACTION_PAUSE
+            val pauseResumeIntent = Intent(context, ScreenRecordingService::class.java).apply {
+                action = pauseOrResumeAction
+            }
+            val pauseResumePendingIntent = PendingIntent.getService(
+                context,
+                if (isPaused) 202 else 203,
+                pauseResumeIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            remoteViews.setOnClickPendingIntent(R.id.btn_notif_pause_resume, pauseResumePendingIntent)
+
+            // Botão Parar (■)
+            val stopIntent = Intent(context, ScreenRecordingService::class.java).apply {
+                action = ACTION_STOP
+            }
+            val stopPendingIntent = PendingIntent.getService(
+                context,
+                204,
+                stopIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            remoteViews.setOnClickPendingIntent(R.id.btn_notif_stop, stopPendingIntent)
+
+            // Botão Pincel / Desenho na tela (sincronizado com FloatingOverlayService)
+            val canDraw = Settings.canDrawOverlays(context)
+            val brushPendingIntent = if (canDraw) {
+                val brushServiceIntent = Intent(context, FloatingOverlayService::class.java).apply {
+                    action = FloatingOverlayService.ACTION_TOGGLE_BRUSH
+                }
+                PendingIntent.getService(
+                    context,
+                    205,
+                    brushServiceIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            } else {
+                val brushActIntent = Intent(context, MainActivity::class.java).apply {
+                    action = FloatingOverlayService.ACTION_TOGGLE_BRUSH
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                PendingIntent.getActivity(
+                    context,
+                    205,
+                    brushActIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            }
+            remoteViews.setOnClickPendingIntent(R.id.btn_notif_brush, brushPendingIntent)
+
+            // Botão Câmera / Facecam (sincronizado com FloatingOverlayService)
+            val hasCameraPerm = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+            val facecamPendingIntent = if (canDraw && (hasCameraPerm || isFacecamActive)) {
+                val facecamServiceIntent = Intent(context, FloatingOverlayService::class.java).apply {
+                    action = FloatingOverlayService.ACTION_TOGGLE_FACECAM
+                }
+                PendingIntent.getService(
+                    context,
+                    206,
+                    facecamServiceIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            } else {
+                val facecamActIntent = Intent(context, MainActivity::class.java).apply {
+                    action = FloatingOverlayService.ACTION_TOGGLE_FACECAM
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                PendingIntent.getActivity(
+                    context,
+                    206,
+                    facecamActIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            }
+            remoteViews.setOnClickPendingIntent(R.id.btn_notif_facecam, facecamPendingIntent)
+
+            // Botão Fechar (X)
+            val closeIntent = Intent(context, ScreenRecordingService::class.java).apply {
+                action = ACTION_CLOSE_NOTIFICATION
+            }
+            val closePendingIntent = PendingIntent.getService(
+                context,
+                207,
+                closeIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            remoteViews.setOnClickPendingIntent(R.id.btn_notif_close, closePendingIntent)
+
+            return remoteViews
+        }
+
+        /**
+         * Constrói a Notification completa com RemoteViews em CustomContentView, CustomBigContentView e CustomHeadsUpContentView
+         * para que a barra de controles fique visível imediatamente no painel do Samsung DeX mesmo recolhida/compacta.
+         */
+        fun buildControlNotification(
+            context: Context,
+            isRecording: Boolean,
+            isPaused: Boolean,
+            elapsedText: String,
+            isBrushActive: Boolean = FloatingOverlayService.isBrushActive,
+            isFacecamActive: Boolean = FloatingOverlayService.isFacecamActive,
+            blinkPhase: Boolean = true
+        ): Notification {
+            ensureNotificationChannel(context)
+
+            val remoteViews = buildCustomControlRemoteViews(
+                context = context,
+                isRecording = isRecording,
+                isPaused = isPaused,
+                elapsedText = elapsedText,
+                isBrushActive = isBrushActive,
+                isFacecamActive = isFacecamActive,
+                blinkPhase = blinkPhase
+            )
+
+            val mainIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val mainPendingIntent = PendingIntent.getActivity(
+                context,
+                0,
+                mainIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val title = when {
+                isRecording && isPaused -> "DexRecorder • Pausado ($elapsedText)"
+                isRecording -> "DexRecorder • Gravando ($elapsedText)"
+                else -> "DexRecorder • Pronto para Gravar"
+            }
+            val content = when {
+                isRecording && isPaused -> "Gravação pausada em $elapsedText"
+                isRecording -> "Tempo decorrido: $elapsedText"
+                else -> "Toque nos controles para gravar, desenhar ou ativar Facecam"
+            }
+
+            val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification_rec)
+                .setContentTitle(title)
+                .setContentText(content)
+                .setContentIntent(mainPendingIntent)
+                .setCustomContentView(remoteViews)
+                .setCustomBigContentView(remoteViews)
+                .setCustomHeadsUpContentView(remoteViews)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            }
+
+            return builder.build()
+        }
+
+        /**
+         * Exibe ou atualiza imediatamente a barra de controle na notificação do sistema.
+         */
+        fun showOrUpdateControlNotification(context: Context, blinkPhase: Boolean = true) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    return
+                }
+            }
+            val status = _recordingStatus.value
+            val isRecording = status is RecordingStatus.Recording ||
+                status is RecordingStatus.Paused ||
+                status is RecordingStatus.Countdown
+            val isPaused = status is RecordingStatus.Paused
+            val durationMs = when (status) {
+                is RecordingStatus.Recording -> status.durationMs
+                is RecordingStatus.Paused -> status.durationMs
+                else -> 0L
+            }
+            val elapsedText = formatDurationStatic(durationMs)
+            val notification = buildControlNotification(
+                context = context,
+                isRecording = isRecording,
+                isPaused = isPaused,
+                elapsedText = elapsedText,
+                blinkPhase = blinkPhase
+            )
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(NOTIFICATION_ID, notification)
+        }
+
+        fun cancelControlNotification(context: Context) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(NOTIFICATION_ID)
         }
     }
 
@@ -119,10 +454,11 @@ class ScreenRecordingService : Service() {
     private var videoHeight = 1080
     private var screenDpi = 320
     private val isStopping = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var dismissNotificationOnStop = false
 
     /**
      * BroadcastReceiver to immediately listen for user action clicks
-     * (Pausar Gravação, Continuar Gravação, Parar e Fechar) directly from the Ongoing Notification.
+     * directly from the Ongoing Notification.
      */
     private val notificationActionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -130,7 +466,10 @@ class ScreenRecordingService : Service() {
             when (intent?.action) {
                 ACTION_PAUSE -> pauseRecording()
                 ACTION_RESUME -> resumeRecording()
-                ACTION_STOP -> stopRecordingSession()
+                ACTION_STOP -> stopRecordingSession(dismissNotification = false)
+                ACTION_CLOSE_NOTIFICATION -> handleCloseNotificationAction()
+                ACTION_TOGGLE_BRUSH_FROM_NOTIF -> forwardOverlayAction(FloatingOverlayService.ACTION_TOGGLE_BRUSH)
+                ACTION_TOGGLE_FACECAM_FROM_NOTIF -> forwardOverlayAction(FloatingOverlayService.ACTION_TOGGLE_FACECAM)
             }
         }
     }
@@ -146,6 +485,9 @@ class ScreenRecordingService : Service() {
             addAction(ACTION_PAUSE)
             addAction(ACTION_RESUME)
             addAction(ACTION_STOP)
+            addAction(ACTION_CLOSE_NOTIFICATION)
+            addAction(ACTION_TOGGLE_BRUSH_FROM_NOTIF)
+            addAction(ACTION_TOGGLE_FACECAM_FROM_NOTIF)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(notificationActionReceiver, filter, RECEIVER_NOT_EXPORTED)
@@ -160,6 +502,7 @@ class ScreenRecordingService : Service() {
 
         when (action) {
             ACTION_START -> {
+                dismissNotificationOnStop = false
                 currentSettings = SettingsPreferences.load(this)
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
                 val resultData: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -172,8 +515,7 @@ class ScreenRecordingService : Service() {
                 // Security check for Android 14+: startForeground MUST only be called if authorized
                 if (resultCode != Activity.RESULT_OK || resultData == null) {
                     Log.e(tag, "Intent de início inválida: resultCode não é RESULT_OK ou dados nulos")
-                    // If started as foreground service, satisfy system requirement before stopping
-                    val initialNotification = buildNotification(isPaused = false, elapsedText = "00:00")
+                    val initialNotification = buildNotification(isRecording = false, isPaused = false, elapsedText = "00:00")
                     startForeground(NOTIFICATION_ID, initialNotification)
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
@@ -186,9 +528,44 @@ class ScreenRecordingService : Service() {
             }
             ACTION_PAUSE -> pauseRecording()
             ACTION_RESUME -> resumeRecording()
-            ACTION_STOP -> stopRecordingSession()
+            ACTION_STOP -> stopRecordingSession(dismissNotification = false)
+            ACTION_CLOSE_NOTIFICATION -> handleCloseNotificationAction()
+            ACTION_TOGGLE_BRUSH_FROM_NOTIF -> forwardOverlayAction(FloatingOverlayService.ACTION_TOGGLE_BRUSH)
+            ACTION_TOGGLE_FACECAM_FROM_NOTIF -> forwardOverlayAction(FloatingOverlayService.ACTION_TOGGLE_FACECAM)
         }
         return START_NOT_STICKY
+    }
+
+    private fun forwardOverlayAction(overlayAction: String) {
+        val overlayIntent = Intent(this, FloatingOverlayService::class.java).apply {
+            action = overlayAction
+        }
+        startService(overlayIntent)
+    }
+
+    private fun handleCloseNotificationAction() {
+        // Fecha o Balão Flutuante e ferramentas de sobreposição sincronizadamente
+        try {
+            val closeOverlayIntent = Intent(this, FloatingOverlayService::class.java).apply {
+                action = FloatingOverlayService.ACTION_CLOSE_ALL
+            }
+            startService(closeOverlayIntent)
+        } catch (_: Exception) {}
+
+        val status = _recordingStatus.value
+        val activeRecording = status is RecordingStatus.Recording ||
+            status is RecordingStatus.Paused ||
+            status is RecordingStatus.Countdown
+
+        if (activeRecording) {
+            stopRecordingSession(dismissNotification = true)
+        } else {
+            cancelControlNotification(this)
+            try {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } catch (_: Exception) {}
+            stopSelf()
+        }
     }
 
     /**
@@ -196,11 +573,10 @@ class ScreenRecordingService : Service() {
      * Guaranteed to be called before getMediaProjection() on Android 14+.
      */
     private fun startForegroundSafely(isPaused: Boolean, elapsedText: String) {
-        val notification = buildNotification(isPaused, elapsedText)
+        val notification = buildNotification(isRecording = true, isPaused = isPaused, elapsedText = elapsedText)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                // Android 14+ (API 34/35) requires FOREGROUND_SERVICE_TYPE_MICROPHONE for AudioPlaybackCapture & AudioRecord
                 serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             }
             startForeground(NOTIFICATION_ID, notification, serviceType)
@@ -209,96 +585,21 @@ class ScreenRecordingService : Service() {
         }
     }
 
-    /**
-     * Builds the Ongoing Notification (Notificação Permanente) with:
-     * - Importance LOW channel (no audio chiming while keeping persistent visibility)
-     * - Dynamic title and elapsed recording time
-     * - Action 1: "Pausar Gravação" or "Continuar Gravação"
-     * - Action 2: "Parar e Fechar"
-     */
-    private fun buildNotification(isPaused: Boolean, elapsedText: String): Notification {
-        val mainIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val mainPendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            mainIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    private fun buildNotification(
+        isRecording: Boolean = true,
+        isPaused: Boolean,
+        elapsedText: String,
+        blinkPhase: Boolean = true
+    ): Notification {
+        return buildControlNotification(
+            context = this,
+            isRecording = isRecording,
+            isPaused = isPaused,
+            elapsedText = elapsedText,
+            blinkPhase = blinkPhase
         )
-
-        // PendingIntent for Pause
-        val pauseIntent = Intent(ACTION_PAUSE).setPackage(packageName)
-        val pausePendingIntent = PendingIntent.getBroadcast(
-            this,
-            101,
-            pauseIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        // PendingIntent for Resume
-        val resumeIntent = Intent(ACTION_RESUME).setPackage(packageName)
-        val resumePendingIntent = PendingIntent.getBroadcast(
-            this,
-            102,
-            resumeIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        // PendingIntent for Stop & Close
-        val stopIntent = Intent(ACTION_STOP).setPackage(packageName)
-        val stopPendingIntent = PendingIntent.getBroadcast(
-            this,
-            103,
-            stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val title = if (isPaused) "Gravação Pausada" else "DexRecorder: Gravando..."
-        val content = if (isPaused) {
-            "Pausado em $elapsedText • Toque para continuar"
-        } else {
-            "Tempo decorrido: $elapsedText • Gravação ativa"
-        }
-
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(content)
-            .setSmallIcon(R.drawable.ic_notification_rec)
-            .setContentIntent(mainPendingIntent)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-        }
-
-        // Add Pause or Resume action dynamically
-        if (isPaused) {
-            builder.addAction(
-                android.R.drawable.ic_media_play,
-                "Continuar Gravação",
-                resumePendingIntent
-            )
-        } else {
-            builder.addAction(
-                android.R.drawable.ic_media_pause,
-                "Pausar Gravação",
-                pausePendingIntent
-            )
-        }
-
-        // Add Stop & Close action
-        builder.addAction(
-            android.R.drawable.ic_menu_close_clear_cancel,
-            "Parar e Fechar",
-            stopPendingIntent
-        )
-
-        return builder.build()
     }
+
 
     private fun startRecordingSession(resultCode: Int, resultData: Intent) {
         isStopping.set(false)
@@ -499,23 +800,23 @@ class ScreenRecordingService : Service() {
                     _recordingStatus.value = RecordingStatus.Recording(recordedDurationMs)
 
                     val formatted = formatDuration(recordedDurationMs)
+                    val blinkPhase = ((recordedDurationMs / 1000L) % 2L == 0L)
                     val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                    notificationManager.notify(NOTIFICATION_ID, buildNotification(isPaused = false, elapsedText = formatted))
+                    notificationManager.notify(
+                        NOTIFICATION_ID,
+                        buildNotification(
+                            isRecording = true,
+                            isPaused = false,
+                            elapsedText = formatted,
+                            blinkPhase = blinkPhase
+                        )
+                    )
                 }
             }
         }
     }
 
-    private fun formatDuration(durationMs: Long): String {
-        val seconds = (durationMs / 1000) % 60
-        val minutes = (durationMs / (1000 * 60)) % 60
-        val hours = durationMs / (1000 * 60 * 60)
-        return if (hours > 0) {
-            String.format("%02d:%02d:%02d", hours, minutes, seconds)
-        } else {
-            String.format("%02d:%02d", minutes, seconds)
-        }
-    }
+    private fun formatDuration(durationMs: Long): String = formatDurationStatic(durationMs)
 
     private fun pauseRecording() {
         if (isPaused) return
@@ -526,7 +827,10 @@ class ScreenRecordingService : Service() {
 
         val formatted = formatDuration(recordedDurationMs)
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(NOTIFICATION_ID, buildNotification(isPaused = true, elapsedText = formatted))
+        notificationManager.notify(
+            NOTIFICATION_ID,
+            buildNotification(isRecording = true, isPaused = true, elapsedText = formatted)
+        )
         Log.d(tag, "Gravação pausada com sucesso via notificação/controle.")
     }
 
@@ -539,11 +843,17 @@ class ScreenRecordingService : Service() {
 
         val formatted = formatDuration(recordedDurationMs)
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(NOTIFICATION_ID, buildNotification(isPaused = false, elapsedText = formatted))
+        notificationManager.notify(
+            NOTIFICATION_ID,
+            buildNotification(isRecording = true, isPaused = false, elapsedText = formatted)
+        )
         Log.d(tag, "Gravação retomada com sucesso via notificação/controle.")
     }
 
-    private fun stopRecordingSession() {
+    private fun stopRecordingSession(dismissNotification: Boolean = false) {
+        if (dismissNotification) {
+            dismissNotificationOnStop = true
+        }
         if (!isStopping.compareAndSet(false, true)) {
             Log.d(tag, "stopRecordingSession() já em execução. Ignorando chamada duplicada.")
             return
@@ -554,8 +864,7 @@ class ScreenRecordingService : Service() {
 
         serviceScope.launch(Dispatchers.IO) {
             try {
-                // TAREFA 3: Validação de Trilha no Encerramento
-                // Envia BUFFER_FLAG_END_OF_STREAM para o codec de áudio e drena todos os pacotes antes de mediaMuxer.stop()
+                // Validação de Trilha no Encerramento
                 audioPipeline?.stop()
                 audioPipeline = null
 
@@ -602,33 +911,23 @@ class ScreenRecordingService : Service() {
             } finally {
                 _recordingStatus.value = RecordingStatus.Idle
                 stopForeground(STOP_FOREGROUND_REMOVE)
-                val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                notificationManager.cancel(NOTIFICATION_ID)
+                if (dismissNotificationOnStop) {
+                    cancelControlNotification(this@ScreenRecordingService)
+                } else {
+                    // Mantém a barra de controle na notificação no estado PRONTO (00:00, botão Gravar visível)
+                    showOrUpdateControlNotification(this@ScreenRecordingService)
+                }
                 stopSelf()
             }
         }
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "DexRecorder Gravação",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Notificação permanente durante a gravação de tela"
-                enableVibration(false)
-                enableLights(false)
-                setShowBadge(false)
-                setSound(null, null)
-            }
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.createNotificationChannel(channel)
-        }
+        ensureNotificationChannel(this)
     }
 
     /**
-     * TAREFA 3: Fechar Automaticamente ao Encerrar o App nos Recentes (onTaskRemoved)
+     * Fechar Automaticamente ao Encerrar o App nos Recentes (onTaskRemoved)
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
@@ -636,8 +935,9 @@ class ScreenRecordingService : Service() {
         val isRecording = status is RecordingStatus.Recording ||
             status is RecordingStatus.Paused ||
             status is RecordingStatus.Countdown
-        // Se não houver uma gravação ativa no momento, fecha a bola flutuante ao fechar o app
+        // Se não houver uma gravação ativa no momento, fecha a bola flutuante e a notificação ao fechar o app
         if (!isRecording) {
+            cancelControlNotification(this)
             stopService(Intent(this, FloatingOverlayService::class.java))
             stopSelf()
         }
@@ -660,3 +960,4 @@ class ScreenRecordingService : Service() {
         serviceScope.cancel()
     }
 }
+
