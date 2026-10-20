@@ -219,7 +219,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify Samsung DeX Notification RemoteViews layout, real-time timer, and dynamic button states`() {
+    fun `verify Samsung DeX Notification RemoteViews layout, native Chronometer, and dynamic button states`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val parent = android.widget.FrameLayout(context)
 
@@ -228,12 +228,11 @@ class ExampleRobolectricTest {
             context = context,
             isRecording = false,
             isPaused = false,
-            elapsedText = "00:00",
             isBrushActive = false,
             isFacecamActive = false
         )
         val readyView = readyRv.apply(context, parent)
-        val readyTimer = readyView.findViewById<android.widget.TextView>(R.id.notif_timer_text)
+        val readyChronometer = readyView.findViewById<android.widget.Chronometer>(R.id.notif_chronometer)
         val readyStatus = readyView.findViewById<android.widget.TextView>(R.id.notif_status_label)
         val readyRecordBtn = readyView.findViewById<android.widget.ImageButton>(R.id.btn_notif_record)
         val readyPauseResumeBtn = readyView.findViewById<android.widget.ImageButton>(R.id.btn_notif_pause_resume)
@@ -242,7 +241,8 @@ class ExampleRobolectricTest {
         val readyFacecamBtn = readyView.findViewById<android.widget.ImageButton>(R.id.btn_notif_facecam)
         val readyCloseBtn = readyView.findViewById<android.widget.ImageButton>(R.id.btn_notif_close)
 
-        assertEquals("00:00", readyTimer.text.toString())
+        assertNotNull(readyChronometer)
+        assertEquals("00:00", readyChronometer.text.toString())
         assertEquals("PRONTO", readyStatus.text.toString())
         assertEquals(android.view.View.VISIBLE, readyRecordBtn.visibility)
         assertEquals(android.view.View.GONE, readyPauseResumeBtn.visibility)
@@ -251,57 +251,58 @@ class ExampleRobolectricTest {
         assertEquals(android.view.View.VISIBLE, readyFacecamBtn.visibility)
         assertEquals(android.view.View.VISIBLE, readyCloseBtn.visibility)
 
-        // 2. Estado GRAVANDO (isRecording = true, isPaused = false)
+        // 2. Estado GRAVANDO (isRecording = true, isPaused = false) com <Chronometer> nativo
+        val base105s = android.os.SystemClock.elapsedRealtime() - 105_000L
         val recRv = ScreenRecordingService.buildCustomControlRemoteViews(
             context = context,
             isRecording = true,
             isPaused = false,
-            elapsedText = "01:45",
             isBrushActive = true,
-            isFacecamActive = false
+            isFacecamActive = false,
+            chronometerBase = base105s
         )
         val recView = recRv.apply(context, parent)
-        val recTimer = recView.findViewById<android.widget.TextView>(R.id.notif_timer_text)
+        val recChronometer = recView.findViewById<android.widget.Chronometer>(R.id.notif_chronometer)
         val recStatus = recView.findViewById<android.widget.TextView>(R.id.notif_status_label)
         val recRecordBtn = recView.findViewById<android.widget.ImageButton>(R.id.btn_notif_record)
         val recPauseResumeBtn = recView.findViewById<android.widget.ImageButton>(R.id.btn_notif_pause_resume)
         val recStopBtn = recView.findViewById<android.widget.ImageButton>(R.id.btn_notif_stop)
 
-        assertEquals("01:45", recTimer.text.toString())
+        assertEquals(base105s, recChronometer.base)
         assertEquals("REC", recStatus.text.toString())
         assertEquals(android.view.View.GONE, recRecordBtn.visibility)
         assertEquals(android.view.View.VISIBLE, recPauseResumeBtn.visibility)
         assertEquals(android.view.View.VISIBLE, recStopBtn.visibility)
-        assertEquals("Pausar Gravação", recPauseResumeBtn.contentDescription.toString())
 
         // 3. Estado PAUSADO (isRecording = true, isPaused = true)
         val pausedRv = ScreenRecordingService.buildCustomControlRemoteViews(
             context = context,
             isRecording = true,
             isPaused = true,
-            elapsedText = "01:45",
             isBrushActive = false,
-            isFacecamActive = true
+            isFacecamActive = true,
+            chronometerBase = base105s
         )
         val pausedView = pausedRv.apply(context, parent)
+        val pausedChronometer = pausedView.findViewById<android.widget.Chronometer>(R.id.notif_chronometer)
         val pausedStatus = pausedView.findViewById<android.widget.TextView>(R.id.notif_status_label)
         val pausedPauseResumeBtn = pausedView.findViewById<android.widget.ImageButton>(R.id.btn_notif_pause_resume)
+        assertEquals(base105s, pausedChronometer.base)
         assertEquals("PAUSADO", pausedStatus.text.toString())
         assertEquals(android.view.View.VISIBLE, pausedPauseResumeBtn.visibility)
-        assertEquals("Continuar Gravação", pausedPauseResumeBtn.contentDescription.toString())
 
-        // 4. Simula o ciclo real do startTimer (reapply a cada segundo: 00:00 PRONTO -> 00:01 REC -> 00:07 REC)
+        // 4. Transição via reapply: 00:00 PRONTO -> REC
+        val base7s = android.os.SystemClock.elapsedRealtime() - 7_000L
         val tick7Rv = ScreenRecordingService.buildCustomControlRemoteViews(
             context = context,
             isRecording = true,
             isPaused = false,
-            elapsedText = "00:07",
             isBrushActive = false,
             isFacecamActive = false,
-            blinkPhase = false
+            chronometerBase = base7s
         )
         tick7Rv.reapply(context, readyView)
-        assertEquals("00:07", readyTimer.text.toString())
+        assertEquals(base7s, readyChronometer.base)
         assertEquals("REC", readyStatus.text.toString())
         assertEquals(android.view.View.GONE, readyRecordBtn.visibility)
         assertEquals(android.view.View.VISIBLE, readyPauseResumeBtn.visibility)
@@ -310,17 +311,19 @@ class ExampleRobolectricTest {
         assertEquals(android.view.View.VISIBLE, readyFacecamBtn.visibility)
         assertEquals(android.view.View.VISIBLE, readyCloseBtn.visibility)
 
-        // 5. Verifica Notification completa (contentView, bigContentView distintos, sem texto simples "Tempo decorrido")
+        // 5. Verifica Notification completa (contentView, bigContentView, setShowWhen=false, setWhen=0L)
         val notification = ScreenRecordingService.buildControlNotification(
             context = context,
             isRecording = true,
             isPaused = false,
-            elapsedText = "00:07"
+            chronometerBase = base7s
         )
         @Suppress("DEPRECATION")
         assertNotNull(notification.contentView)
         @Suppress("DEPRECATION")
         assertNotNull(notification.bigContentView)
+        assertEquals(0L, notification.`when`)
+        assertEquals(false, notification.extras.getBoolean(android.app.Notification.EXTRA_SHOW_WHEN, true))
         assertEquals(null, notification.extras.getCharSequence(android.app.Notification.EXTRA_TITLE))
         assertEquals(null, notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT))
         assertEquals(true, (notification.flags and android.app.Notification.FLAG_ONGOING_EVENT) != 0)

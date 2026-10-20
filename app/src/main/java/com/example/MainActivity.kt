@@ -74,7 +74,9 @@ class MainActivity : ComponentActivity() {
         setupActivityResultLaunchers()
 
         // Exibe imediatamente a Barra de Controle na Notificação (estado PRONTO 00:00) se já possuir permissão
-        ScreenRecordingService.showOrUpdateControlNotification(this)
+        if (!ScreenRecordingService.isStartingOrRecording) {
+            ScreenRecordingService.showOrUpdateControlNotification(this)
+        }
 
         val triggeredFromExternalControl = isExternalControlIntent(intent)
         if (!triggeredFromExternalControl) {
@@ -94,7 +96,7 @@ class MainActivity : ComponentActivity() {
                 DexRecorderApp(
                     viewModel = viewModel,
                     onRequestStartRecording = {
-                        minimizeAfterCaptureApproval = false
+                        minimizeAfterCaptureApproval = true
                         startRecordingWorkflow()
                     },
                     onRequestOverlayPermission = { requestOverlayPermission() }
@@ -164,17 +166,37 @@ class MainActivity : ComponentActivity() {
             action = toolAction
         }
         startService(serviceIntent)
-        moveTaskToBack(true)
+        minimizeAppWindow()
     }
 
     override fun onResume() {
         super.onResume()
-        // Garante que a Barra de Controle na Notificação esteja sempre atualizada e visível
-        ScreenRecordingService.showOrUpdateControlNotification(this)
+        // Garante que a Barra de Controle na Notificação esteja visível no estado ocioso
+        // sem sobrescrever a notificação de gravação durante o início do serviço
+        if (!ScreenRecordingService.isStartingOrRecording) {
+            ScreenRecordingService.showOrUpdateControlNotification(this)
+        }
         // Caso o usuário retorne da tela de permissão de sobreposição com ela aceita,
         // inicia a bola flutuante automaticamente se a opção estiver ativa.
         if (viewModel.settings.value.showFloatingBall && Settings.canDrawOverlays(this)) {
             startFloatingBallService()
+        }
+    }
+
+    /**
+     * Minimiza automaticamente a janela da Activity (inclusive em janelas livres do Samsung DeX)
+     * para não cobrir a área que será gravada.
+     */
+    private fun minimizeAppWindow() {
+        try {
+            moveTaskToBack(true)
+            window?.decorView?.post {
+                try {
+                    moveTaskToBack(true)
+                } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            Log.w(tag, "Não foi possível minimizar a janela automaticamente", e)
         }
     }
 
@@ -195,7 +217,7 @@ class MainActivity : ComponentActivity() {
 
             Log.d(tag, "Permissões concedidas: Áudio=$audioGranted, Notificações=$notificationsGranted, Câmera=$cameraGranted")
 
-            if (notificationsGranted) {
+            if (notificationsGranted && !ScreenRecordingService.isStartingOrRecording) {
                 ScreenRecordingService.showOrUpdateControlNotification(this)
             }
 
@@ -207,7 +229,7 @@ class MainActivity : ComponentActivity() {
                         action = toolAction
                     }
                     startService(serviceIntent)
-                    moveTaskToBack(true)
+                    minimizeAppWindow()
                 }
             }
 
@@ -247,16 +269,15 @@ class MainActivity : ComponentActivity() {
             val shouldMinimize = minimizeAfterCaptureApproval
             minimizeAfterCaptureApproval = false
             if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-                Log.d(tag, "Usuário autorizou captura de tela. Iniciando Foreground Service de forma segura.")
+                Log.d(tag, "Usuário autorizou captura de tela. Iniciando Foreground Service e minimizando janela.")
+                ScreenRecordingService.prepareForRecordingStart()
                 startSafeRecordingService(result.resultCode, result.data!!)
-                if (shouldMinimize) {
-                    moveTaskToBack(true)
-                }
+                minimizeAppWindow()
             } else {
                 Log.w(tag, "Usuário recusou ou cancelou o pop-up de captura de tela.")
                 Toast.makeText(this, "Captura de tela cancelada pelo usuário.", Toast.LENGTH_SHORT).show()
                 if (shouldMinimize) {
-                    moveTaskToBack(true)
+                    minimizeAppWindow()
                 }
             }
         }

@@ -11,7 +11,7 @@
     android:paddingEnd="6dp"
     android:paddingBottom="4dp">
 
-    <!-- Indicador de Status (Ponto Colorido) + Cronômetro em Tempo Real (00:00) -->
+    <!-- Indicador de Status (Ponto Colorido) + Cronômetro Nativo em Tempo Real (00:00) -->
     <LinearLayout
         android:id="@+id/notif_status_container"
         android:layout_width="wrap_content"
@@ -29,8 +29,8 @@
             android:contentDescription="Status da Gravação"
             android:src="@drawable/dot_status_ready" />
 
-        <TextView
-            android:id="@+id/notif_timer_text"
+        <Chronometer
+            android:id="@+id/notif_chronometer"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="5dp"
@@ -89,7 +89,7 @@
             android:layout_height="32dp"
             android:layout_marginEnd="4dp"
             android:background="@drawable/bg_notif_btn_circle"
-            android:contentDescription="Pausar Gravação"
+            android:contentDescription="Pausar ou Continuar Gravação"
             android:padding="6dp"
             android:scaleType="centerInside"
             android:src="@drawable/ic_notif_pause"
