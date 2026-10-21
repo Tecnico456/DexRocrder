@@ -622,6 +622,8 @@ class AudioCaptureAndEncoder(
      */
     private fun drainOutput(endOfStream: Boolean) {
         val codec = audioCodec ?: return
+        var tryAgainCount = 0
+        val maxTryAgain = if (endOfStream) 8 else 1
         while (true) {
             val outputIndex = try {
                 codec.dequeueOutputBuffer(bufferInfo, 10_000L)
@@ -632,14 +634,17 @@ class AudioCaptureAndEncoder(
 
             when {
                 outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                    if (!endOfStream) break
+                    tryAgainCount++
+                    if (!endOfStream || tryAgainCount >= maxTryAgain) break
                 }
                 outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    tryAgainCount = 0
                     val newFormat = codec.outputFormat
                     Log.d(TAG, "Formato do codec de áudio alterado (INFO_OUTPUT_FORMAT_CHANGED): $newFormat")
                     audioTrackIndex = muxerManager.addAudioTrack(newFormat)
                 }
                 outputIndex >= 0 -> {
+                    tryAgainCount = 0
                     val outputBuffer = codec.getOutputBuffer(outputIndex)
                     if (outputBuffer != null && bufferInfo.size > 0) {
                         if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
@@ -703,6 +708,7 @@ class AudioCaptureAndEncoder(
         val codec = audioCodec
         if (codec != null) {
             try {
+                var eosQueued = false
                 val inputIndex = codec.dequeueInputBuffer(10_000L)
                 if (inputIndex >= 0) {
                     val audioPtsUs = (totalAudioBytesRead * 1_000_000L) / (SAMPLE_RATE * CHANNEL_COUNT * 2L)
@@ -713,9 +719,10 @@ class AudioCaptureAndEncoder(
                         audioPtsUs,
                         MediaCodec.BUFFER_FLAG_END_OF_STREAM
                     )
+                    eosQueued = true
                 }
 
-                drainOutput(endOfStream = true)
+                drainOutput(endOfStream = eosQueued)
 
                 codec.stop()
                 codec.release()

@@ -55,6 +55,7 @@ class MainActivity : ComponentActivity() {
 
     // Flag para minimizar a janela automaticamente quando a gravação ou ferramenta é acionada pelo Balão Flutuante / Notificação DeX
     private var minimizeAfterCaptureApproval = false
+    private var isAwaitingCapturePermission = false
     private var pendingOverlayToolAction: String? = null
 
     // 1. Launcher para permissões de runtime (POST_NOTIFICATIONS, RECORD_AUDIO, CAMERA)
@@ -172,8 +173,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         // Garante que a Barra de Controle na Notificação esteja visível no estado ocioso
-        // sem sobrescrever a notificação de gravação durante o início do serviço
-        if (!ScreenRecordingService.isStartingOrRecording) {
+        // sem sobrescrever a notificação de gravação ou disparar atualizações extras durante o prompt de captura
+        if (!ScreenRecordingService.isStartingOrRecording && !isAwaitingCapturePermission) {
             ScreenRecordingService.showOrUpdateControlNotification(this)
         }
         // Caso o usuário retorne da tela de permissão de sobreposição com ela aceita,
@@ -266,6 +267,7 @@ class MainActivity : ComponentActivity() {
         ) { result ->
             // PASSO 3: INÍCIO SEGURO DO SERVIÇO
             // Só chamamos startForegroundService DEPOIS que o usuário aprovar o pop-up
+            isAwaitingCapturePermission = false
             val shouldMinimize = minimizeAfterCaptureApproval
             minimizeAfterCaptureApproval = false
             if (result.resultCode == Activity.RESULT_OK && result.data != null) {
@@ -386,8 +388,10 @@ class MainActivity : ComponentActivity() {
             } else {
                 projectionManager.createScreenCaptureIntent()
             }
+            isAwaitingCapturePermission = true
             screenCaptureLauncher.launch(captureIntent)
         } catch (e: Exception) {
+            isAwaitingCapturePermission = false
             Log.e(tag, "Falha ao criar ScreenCaptureIntent", e)
             Toast.makeText(this, "Erro ao iniciar captura: ${e.message}", Toast.LENGTH_LONG).show()
         }

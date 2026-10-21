@@ -332,6 +332,17 @@ class ExampleRobolectricTest {
         assertEquals(null, notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT))
         assertEquals(true, (notification.flags and android.app.Notification.FLAG_ONGOING_EVENT) != 0)
         assertEquals(true, (notification.flags and android.app.Notification.FLAG_ONLY_ALERT_ONCE) != 0)
+
+        // 6. Verifica que múltiplas gravações seguidas alocam IDs de notificação exclusivos e inéditos
+        // (separados de NOTIFICATION_ID = 1001) para impedir Cooldown / CustomView Stripping na One UI 7.0
+        val sessionId1 = ScreenRecordingService.allocateNextRecordingNotificationId()
+        val sessionId2 = ScreenRecordingService.allocateNextRecordingNotificationId()
+        val sessionId3 = ScreenRecordingService.allocateNextRecordingNotificationId()
+        assertEquals(true, sessionId1 > ScreenRecordingService.NOTIFICATION_ID)
+        assertEquals(sessionId1 + 1, sessionId2)
+        assertEquals(sessionId2 + 1, sessionId3)
+        ScreenRecordingService.cancelControlNotification(context)
+        assertEquals(ScreenRecordingService.NOTIFICATION_ID, ScreenRecordingService.activeNotificationId)
     }
 }
 

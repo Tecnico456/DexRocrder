@@ -76,6 +76,24 @@ class ScreenRecordingService : Service() {
         private const val LEGACY_CHANNEL_ID = "dex_recorder_channel"
         const val CHANNEL_ID = "dex_recorder_control_channel_v2"
         const val NOTIFICATION_ID = 1001
+        private const val RECORDING_NOTIFICATION_BASE_ID = 2000
+
+        private val recordingSessionCounter = java.util.concurrent.atomic.AtomicInteger(0)
+
+        @Volatile
+        var activeNotificationId: Int = NOTIFICATION_ID
+            private set
+
+        /**
+         * Aloca um ID de notificação exclusivo e inédito para cada sessão de gravação (2001, 2002, 2003...),
+         * impedindo que a One UI 7.0 (Android 15) reutilize a mesma NotificationEntry após stopForeground
+         * ou aplique Cooldown / CustomView Stripping a partir da 2ª gravação seguida.
+         */
+        fun allocateNextRecordingNotificationId(): Int {
+            val nextId = RECORDING_NOTIFICATION_BASE_ID + recordingSessionCounter.incrementAndGet()
+            activeNotificationId = nextId
+            return nextId
+        }
 
         const val ACTION_START = "com.example.action.START"
         const val ACTION_PAUSE = "com.example.action.PAUSE"
@@ -112,6 +130,7 @@ class ScreenRecordingService : Service() {
         fun prepareForRecordingStart() {
             isStartingOrRecording = true
             chronometerBaseRealtime = SystemClock.elapsedRealtime()
+            lastNotifiedSignature = null
             _recordingStatus.value = RecordingStatus.Recording(0L)
         }
 
@@ -145,6 +164,10 @@ class ScreenRecordingService : Service() {
         fun ensureNotificationChannel(context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val existing = manager.getNotificationChannel(CHANNEL_ID)
+                if (existing != null && existing.importance >= NotificationManager.IMPORTANCE_DEFAULT) {
+                    return
+                }
                 try {
                     manager.deleteNotificationChannel(LEGACY_CHANNEL_ID)
                 } catch (_: Exception) {}
@@ -395,16 +418,6 @@ class ScreenRecordingService : Service() {
                 blinkPhase = blinkPhase,
                 chronometerBase = chronometerBase
             )
-            val headsUpRemoteViews = buildCustomControlRemoteViews(
-                context = context,
-                isRecording = isRecording,
-                isPaused = isPaused,
-                elapsedText = elapsedText,
-                isBrushActive = isBrushActive,
-                isFacecamActive = isFacecamActive,
-                blinkPhase = blinkPhase,
-                chronometerBase = chronometerBase
-            )
 
             val mainIntent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -424,7 +437,6 @@ class ScreenRecordingService : Service() {
                 .setContentIntent(mainPendingIntent)
                 .setCustomContentView(collapsedRemoteViews)
                 .setCustomBigContentView(expandedRemoteViews)
-                .setCustomHeadsUpContentView(headsUpRemoteViews)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setSound(null)
@@ -460,6 +472,7 @@ class ScreenRecordingService : Service() {
                     return
                 }
             }
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val status = _recordingStatus.value
             val isRecording = isStartingOrRecording ||
                 status is RecordingStatus.Recording ||
@@ -469,7 +482,19 @@ class ScreenRecordingService : Service() {
             val brushActive = FloatingOverlayService.isBrushActive
             val facecamActive = FloatingOverlayService.isFacecamActive
 
-            val signature = "$isRecording:$isPaused:$brushActive:$facecamActive"
+            val targetNotificationId = if (isRecording && activeNotificationId != NOTIFICATION_ID) {
+                activeNotificationId
+            } else {
+                if (!isRecording && activeNotificationId != NOTIFICATION_ID) {
+                    try {
+                        nm.cancel(activeNotificationId)
+                    } catch (_: Exception) {}
+                    activeNotificationId = NOTIFICATION_ID
+                }
+                NOTIFICATION_ID
+            }
+
+            val signature = "$targetNotificationId:$isRecording:$isPaused:$brushActive:$facecamActive"
             if (!forceUpdate && signature == lastNotifiedSignature) {
                 return
             }
@@ -500,14 +525,20 @@ class ScreenRecordingService : Service() {
                 blinkPhase = blinkPhase,
                 chronometerBase = baseTime
             )
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.notify(NOTIFICATION_ID, notification)
+            nm.notify(targetNotificationId, notification)
         }
 
         fun cancelControlNotification(context: Context) {
             lastNotifiedSignature = null
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.cancel(NOTIFICATION_ID)
+            val prevActiveId = activeNotificationId
+            activeNotificationId = NOTIFICATION_ID
+            try {
+                nm.cancel(NOTIFICATION_ID)
+                if (prevActiveId != NOTIFICATION_ID) {
+                    nm.cancel(prevActiveId)
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -515,6 +546,7 @@ class ScreenRecordingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private var mediaProjection: MediaProjection? = null
+    private var projectionCallback: MediaProjection.Callback? = null
     private var muxerManager: MediaMuxerManager? = null
     private var videoEncoder: ScreenVideoEncoder? = null
     private var audioPipeline: AudioCaptureAndEncoder? = null
@@ -653,12 +685,23 @@ class ScreenRecordingService : Service() {
     }
 
     /**
-     * Safely initiates Foreground Service with appropriate ServiceInfo flags.
+     * Safely initiates Foreground Service with appropriate ServiceInfo flags and a fresh
+     * session notification ID so One UI 7.0 never reuses a stopped Foreground NotificationEntry.
      * Guaranteed to be called before getMediaProjection() on Android 14+.
      */
     private fun startForegroundSafely(isPaused: Boolean, elapsedText: String) {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val previousActiveId = activeNotificationId
+        try {
+            nm.cancel(NOTIFICATION_ID)
+            if (previousActiveId != NOTIFICATION_ID) {
+                nm.cancel(previousActiveId)
+            }
+        } catch (_: Exception) {}
+
+        val sessionNotifId = allocateNextRecordingNotificationId()
         val notification = buildNotification(isRecording = true, isPaused = isPaused, elapsedText = elapsedText)
-        lastNotifiedSignature = "true:$isPaused:${FloatingOverlayService.isBrushActive}:${FloatingOverlayService.isFacecamActive}"
+        lastNotifiedSignature = "$sessionNotifId:true:$isPaused:${FloatingOverlayService.isBrushActive}:${FloatingOverlayService.isFacecamActive}"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -670,9 +713,9 @@ class ScreenRecordingService : Service() {
                     serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                 }
             }
-            startForeground(NOTIFICATION_ID, notification, serviceType)
+            startForeground(sessionNotifId, notification, serviceType)
         } else {
-            startForeground(NOTIFICATION_ID, notification)
+            startForeground(sessionNotifId, notification)
         }
     }
 
@@ -704,10 +747,15 @@ class ScreenRecordingService : Service() {
         elapsedText: String = formatDuration(recordedDurationMs),
         blinkPhase: Boolean = true
     ) {
-        lastNotifiedSignature = "$isRecording:$isPaused:${FloatingOverlayService.isBrushActive}:${FloatingOverlayService.isFacecamActive}"
+        val targetNotifId = if (isRecording && activeNotificationId != NOTIFICATION_ID) {
+            activeNotificationId
+        } else {
+            NOTIFICATION_ID
+        }
+        lastNotifiedSignature = "$targetNotifId:$isRecording:$isPaused:${FloatingOverlayService.isBrushActive}:${FloatingOverlayService.isFacecamActive}"
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(
-            NOTIFICATION_ID,
+            targetNotifId,
             buildNotification(
                 isRecording = isRecording,
                 isPaused = isPaused,
@@ -733,12 +781,14 @@ class ScreenRecordingService : Service() {
                 }
 
                 // Android 14 requires a registered callback on MediaProjection
-                projection.registerCallback(object : MediaProjection.Callback() {
+                val callback = object : MediaProjection.Callback() {
                     override fun onStop() {
                         Log.i(tag, "MediaProjection finalizado pelo sistema ou usuário")
                         stopRecordingSession()
                     }
-                }, Handler(Looper.getMainLooper()))
+                }
+                projection.registerCallback(callback, Handler(Looper.getMainLooper()))
+                projectionCallback = callback
                 mediaProjection = projection
 
                 // Prepare MediaStore output file
@@ -969,22 +1019,62 @@ class ScreenRecordingService : Service() {
         timerJob?.cancel()
         timerJob = null
 
+        val finishedSessionNotifId = activeNotificationId
+        val shouldDismiss = dismissNotificationOnStop
+        val audioToStop = audioPipeline
+        audioPipeline = null
+        val videoToStop = videoEncoder
+        videoEncoder = null
+        val muxerToStop = muxerManager
+        muxerManager = null
+        val projectionToStop = mediaProjection
+        mediaProjection = null
+        val callbackToUnregister = projectionCallback
+        projectionCallback = null
+        val outputToFinish = mediaStoreOutput
+        mediaStoreOutput = null
+        val finalDurationMs = recordedDurationMs
+        val finalWidth = videoWidth
+        val finalHeight = videoHeight
+        val finalFps = currentSettings.fps.fps
+        val finalAudioSource = currentSettings.audioMode.name
+
         serviceScope.launch(Dispatchers.IO) {
             try {
-                // Validação de Trilha no Encerramento
-                audioPipeline?.stop()
-                audioPipeline = null
+                kotlinx.coroutines.withTimeoutOrNull(2500L) {
+                    // Validação de Trilha no Encerramento
+                    try {
+                        audioToStop?.stop()
+                    } catch (e: Exception) {
+                        Log.w(tag, "Exceção ao parar audioPipeline", e)
+                    }
 
-                videoEncoder?.stop()
-                videoEncoder = null
+                    try {
+                        videoToStop?.stop()
+                    } catch (e: Exception) {
+                        Log.w(tag, "Exceção ao parar videoEncoder", e)
+                    }
 
-                muxerManager?.stopAndRelease()
-                muxerManager = null
+                    try {
+                        muxerToStop?.stopAndRelease()
+                    } catch (e: Exception) {
+                        Log.w(tag, "Exceção ao finalizar muxerManager", e)
+                    }
+                }
 
-                mediaProjection?.stop()
-                mediaProjection = null
+                try {
+                    if (callbackToUnregister != null) {
+                        projectionToStop?.unregisterCallback(callbackToUnregister)
+                    }
+                } catch (_: Exception) {}
 
-                mediaStoreOutput?.let { out ->
+                try {
+                    projectionToStop?.stop()
+                } catch (e: Exception) {
+                    Log.w(tag, "Exceção ao parar mediaProjection", e)
+                }
+
+                outputToFinish?.let { out ->
                     try {
                         out.pfd.close()
                     } catch (_: Exception) {}
@@ -1000,12 +1090,12 @@ class ScreenRecordingService : Service() {
                         title = out.displayName,
                         filePath = out.approximatePath,
                         uriString = out.uri.toString(),
-                        durationMs = recordedDurationMs,
+                        durationMs = finalDurationMs,
                         sizeBytes = size,
-                        width = videoWidth,
-                        height = videoHeight,
-                        fps = currentSettings.fps.fps,
-                        audioSource = currentSettings.audioMode.name,
+                        width = finalWidth,
+                        height = finalHeight,
+                        fps = finalFps,
+                        audioSource = finalAudioSource,
                         createdAt = System.currentTimeMillis()
                     )
 
@@ -1016,18 +1106,36 @@ class ScreenRecordingService : Service() {
             } catch (e: Exception) {
                 Log.e(tag, "Erro ao finalizar gravação", e)
             } finally {
-                isStartingOrRecording = false
-                chronometerBaseRealtime = 0L
-                lastNotifiedSignature = null
-                _recordingStatus.value = RecordingStatus.Idle
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                if (dismissNotificationOnStop) {
-                    cancelControlNotification(this@ScreenRecordingService)
-                } else {
-                    // Mantém a barra de controle na notificação no estado PRONTO (00:00, botão Gravar visível)
-                    showOrUpdateControlNotification(this@ScreenRecordingService, forceUpdate = true)
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    isStopping.set(false)
+                    // Só limpa o serviço e restaura o estado PRONTO se uma nova gravação já não tiver iniciado
+                    if (!isStartingOrRecording || activeNotificationId == finishedSessionNotifId) {
+                        isStartingOrRecording = false
+                        chronometerBaseRealtime = 0L
+                        lastNotifiedSignature = null
+                        activeNotificationId = NOTIFICATION_ID
+                        _recordingStatus.value = RecordingStatus.Idle
+
+                        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                        try {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                        } catch (_: Exception) {}
+                        try {
+                            if (finishedSessionNotifId != NOTIFICATION_ID) {
+                                nm.cancel(finishedSessionNotifId)
+                            }
+                        } catch (_: Exception) {}
+
+                        if (shouldDismiss) {
+                            cancelControlNotification(this@ScreenRecordingService)
+                        } else {
+                            val appCtx = applicationContext
+                            // Publica 1 única vez a barra no estado PRONTO (00:00) no ID ocioso (1001)
+                            showOrUpdateControlNotification(appCtx, forceUpdate = true)
+                        }
+                        stopSelf()
+                    }
                 }
-                stopSelf()
             }
         }
     }

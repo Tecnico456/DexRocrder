@@ -1,6 +1,6 @@
 {
-  "summary":  "Plano de correção definitiva para impedir que a notificação de controle no Samsung DeX seja minimizada ou colapsada em uma linha vazia ao iniciar a gravação, atualizando o canal para IMPORTANCE_DEFAULT (com novo ID para contornar o cache do Android), removendo flags de minimização silenciosa e garantindo inflação segura do RemoteViews.",
-  "updatedAt":  "2026-10-20T23:05:31.071050155Z",
+  "summary":  "Plano arquitetural e de ciclo de vida para garantir que a barra de controle na notificação do Samsung DeX (One UI 7.0 / Android 15) funcione em todas as gravações seguidas (1ª, 2ª, 3ª...), eliminando o reuso do mesmo NOTIFICATION_ID após stopForeground, isolando cada sessão de gravação em uma NotificationEntry inédita e otimizando a quota de RemoteViews no SystemUI.",
+  "updatedAt":  "2026-10-21T00:49:22.861031329Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
