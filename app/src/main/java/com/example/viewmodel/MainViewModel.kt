@@ -170,10 +170,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateFloatingOpacity(context: Context, opacity: Float) {
         updateSettings { it.copy(floatingBallOpacity = opacity) }
-        if (Settings.canDrawOverlays(context)) {
+        if (Settings.canDrawOverlays(context) && FloatingOverlayService.isFloatingBallVisible) {
             val intent = Intent(context, FloatingOverlayService::class.java).apply {
                 action = FloatingOverlayService.ACTION_UPDATE_OPACITY
                 putExtra(FloatingOverlayService.EXTRA_OPACITY, opacity)
+            }
+            context.startService(intent)
+        }
+    }
+
+    fun updateFloatingBubbleSize(context: Context, sizePercent: Int) {
+        val sanitized = SettingsPreferences.sanitizeSizePercent(sizePercent)
+        updateSettings { it.copy(floatingBubbleSizePercent = sanitized) }
+        if (Settings.canDrawOverlays(context) && FloatingOverlayService.isFloatingBallVisible) {
+            val intent = Intent(context, FloatingOverlayService::class.java).apply {
+                action = FloatingOverlayService.ACTION_UPDATE_BUBBLE_SIZE
+                putExtra(FloatingOverlayService.EXTRA_BUBBLE_SIZE_PERCENT, sanitized)
+            }
+            context.startService(intent)
+        }
+    }
+
+    fun resetFloatingBubbleSize(context: Context) {
+        updateFloatingBubbleSize(context, SettingsPreferences.DEFAULT_BUBBLE_SIZE_PERCENT)
+    }
+
+    fun updateDexMiniBarSize(context: Context, sizePercent: Int) {
+        val sanitizedSize = SettingsPreferences.sanitizeSizePercent(sizePercent)
+        val currentOpacity = _settings.value.dexMiniBarOpacityPercent
+        updateSettings { it.copy(dexMiniBarSizePercent = sanitizedSize) }
+        syncMiniBarStyleIfVisible(context, sanitizedSize, currentOpacity)
+    }
+
+    fun updateDexMiniBarOpacity(context: Context, opacityPercent: Int) {
+        val sanitizedOpacity = SettingsPreferences.sanitizeMiniBarOpacityPercent(opacityPercent)
+        val currentSize = _settings.value.dexMiniBarSizePercent
+        updateSettings { it.copy(dexMiniBarOpacityPercent = sanitizedOpacity) }
+        syncMiniBarStyleIfVisible(context, currentSize, sanitizedOpacity)
+    }
+
+    fun resetDexMiniBarStyle(context: Context) {
+        val defaultSize = SettingsPreferences.DEFAULT_MINI_BAR_SIZE_PERCENT
+        val defaultOpacity = SettingsPreferences.DEFAULT_MINI_BAR_OPACITY_PERCENT
+        updateSettings {
+            it.copy(
+                dexMiniBarSizePercent = defaultSize,
+                dexMiniBarOpacityPercent = defaultOpacity
+            )
+        }
+        syncMiniBarStyleIfVisible(context, defaultSize, defaultOpacity)
+    }
+
+    private fun syncMiniBarStyleIfVisible(context: Context, sizePercent: Int, opacityPercent: Int) {
+        if (Settings.canDrawOverlays(context) &&
+            (FloatingOverlayService.isDexMiniBarVisible || FloatingOverlayService.isMiniControlVisible)
+        ) {
+            val intent = Intent(context, FloatingOverlayService::class.java).apply {
+                action = FloatingOverlayService.ACTION_UPDATE_MINI_BAR_STYLE
+                putExtra(FloatingOverlayService.EXTRA_MINI_BAR_SIZE_PERCENT, sizePercent)
+                putExtra(FloatingOverlayService.EXTRA_MINI_BAR_OPACITY_PERCENT, opacityPercent)
             }
             context.startService(intent)
         }

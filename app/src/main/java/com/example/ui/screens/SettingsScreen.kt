@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.os.Build
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -65,7 +66,8 @@ import com.example.viewmodel.MainViewModel
 fun SettingsScreen(
     viewModel: MainViewModel,
     onRequestOverlayPermission: () -> Unit = {},
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    androidSdkInt: Int = Build.VERSION.SDK_INT
 ) {
     val context = LocalContext.current
     val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -210,6 +212,17 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        DexMiniBarStyleControls(
+                            sizePercent = settings.dexMiniBarSizePercent,
+                            opacityPercent = settings.dexMiniBarOpacityPercent,
+                            collapseBehavior = settings.miniBarCollapseBehavior,
+                            onSizeChange = { viewModel.updateDexMiniBarSize(context, it) },
+                            onOpacityChange = { viewModel.updateDexMiniBarOpacity(context, it) },
+                            onResetToDefault = { viewModel.resetDexMiniBarStyle(context) }
+                        )
                     }
                 }
 
@@ -279,6 +292,11 @@ fun SettingsScreen(
                             )
                         }
                     }
+                }
+
+                if (androidSdkInt >= 35) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Android15NotificationInfoCard(androidSdkInt = androidSdkInt)
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))

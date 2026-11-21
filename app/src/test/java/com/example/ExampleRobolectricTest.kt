@@ -481,6 +481,131 @@ class ExampleRobolectricTest {
         assertEquals(1, miniStopClicked)
         assertEquals(1, miniDismissClicked)
     }
+
+    @Test
+    fun `verify overlay size and opacity SharedPreferences clamping and real proportional WindowManager resizing`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+
+        // 1. Defaults e clamping de segurança (coerceIn + passos de 5%)
+        val defaults = com.example.model.RecordingSettings()
+        assertEquals(120, defaults.floatingBubbleSizePercent)
+        assertEquals(120, defaults.dexMiniBarSizePercent)
+        assertEquals(90, defaults.dexMiniBarOpacityPercent)
+
+        assertEquals(80, com.example.model.SettingsPreferences.sanitizeSizePercent(50))
+        assertEquals(180, com.example.model.SettingsPreferences.sanitizeSizePercent(250))
+        assertEquals(125, com.example.model.SettingsPreferences.sanitizeSizePercent(123))
+        assertEquals(25, com.example.model.SettingsPreferences.sanitizeMiniBarOpacityPercent(5))
+        assertEquals(100, com.example.model.SettingsPreferences.sanitizeMiniBarOpacityPercent(150))
+        assertEquals(65, com.example.model.SettingsPreferences.sanitizeMiniBarOpacityPercent(64))
+
+        // Opacidade proporcional da Aba Lateral Recolhida: min(userAlpha * 0.65, 0.55) >= 0.25
+        assertEquals(0.25f, com.example.model.SettingsPreferences.computeEdgeTabAlpha(25), 0.001f)
+        assertEquals(0.325f, com.example.model.SettingsPreferences.computeEdgeTabAlpha(50), 0.001f)
+        assertEquals(0.55f, com.example.model.SettingsPreferences.computeEdgeTabAlpha(90), 0.001f)
+        assertEquals(0.55f, com.example.model.SettingsPreferences.computeEdgeTabAlpha(100), 0.001f)
+
+        // Persistência + coerceIn ao salvar/recarregar SharedPreferences
+        val outOfBounds = defaults.copy(
+            floatingBubbleSizePercent = 240,
+            dexMiniBarSizePercent = 40,
+            dexMiniBarOpacityPercent = 10
+        )
+        com.example.model.SettingsPreferences.save(context, outOfBounds)
+        val clampedReload = com.example.model.SettingsPreferences.load(context)
+        assertEquals(180, clampedReload.floatingBubbleSizePercent)
+        assertEquals(80, clampedReload.dexMiniBarSizePercent)
+        assertEquals(25, clampedReload.dexMiniBarOpacityPercent)
+
+        val validCustom = defaults.copy(
+            floatingBubbleSizePercent = 155,
+            dexMiniBarSizePercent = 140,
+            dexMiniBarOpacityPercent = 75
+        )
+        com.example.model.SettingsPreferences.save(context, validCustom)
+        val validReload = com.example.model.SettingsPreferences.load(context)
+        assertEquals(155, validReload.floatingBubbleSizePercent)
+        assertEquals(140, validReload.dexMiniBarSizePercent)
+        assertEquals(75, validReload.dexMiniBarOpacityPercent)
+
+        // 2. Redimensionamento proporcional real da FloatingBallView (sem scaleX/scaleY)
+        val ball = com.example.overlay.FloatingBallView(
+            context = context,
+            windowManager = wm,
+            onStartRecording = {},
+            onToggleBrush = {},
+            onToggleFacecam = {},
+            onCloseBall = {},
+            initialSizePercent = 80
+        )
+        val widthAt80 = ball.bubbleContainer.layoutParams.width
+        val btnWidthAt80 = ball.btnPauseResume.layoutParams.width
+        ball.applySizePercent(160)
+        val widthAt160 = ball.bubbleContainer.layoutParams.width
+        val btnWidthAt160 = ball.btnPauseResume.layoutParams.width
+        assertEquals(160, ball.currentSizePercent)
+        assertEquals(true, widthAt160 > widthAt80)
+        assertEquals(true, btnWidthAt160 > btnWidthAt80)
+        assertEquals(1.0f, ball.scaleX, 0.001f)
+        assertEquals(1.0f, ball.scaleY, 0.001f)
+        assertEquals(android.view.WindowManager.LayoutParams.WRAP_CONTENT, ball.layoutParams.width)
+        assertEquals(android.view.WindowManager.LayoutParams.WRAP_CONTENT, ball.layoutParams.height)
+
+        // 3. Redimensionamento proporcional real + opacidade da DexMiniBarView (+ Aba Lateral)
+        val miniBar = com.example.overlay.DexMiniBarView(
+            context = context,
+            windowManager = wm,
+            initialCollapseBehavior = com.example.model.MiniBarCollapseBehavior.COLLAPSE_TO_EDGE_TAB,
+            onTogglePauseResume = {},
+            onStopRecording = {},
+            onHideUntilNotificationTap = {},
+            initialSizePercent = 80,
+            initialOpacityPercent = 90
+        )
+        val pillBtnWidthAt80 = miniBar.btnPauseResume.layoutParams.width
+        miniBar.applyStyle(160, 50)
+        val pillBtnWidthAt160 = miniBar.btnPauseResume.layoutParams.width
+        assertEquals(160, miniBar.currentSizePercent)
+        assertEquals(50, miniBar.currentOpacityPercent)
+        assertEquals(true, pillBtnWidthAt160 > pillBtnWidthAt80)
+        assertEquals(0.50f, miniBar.pillContainer.alpha, 0.001f)
+        assertEquals(
+            com.example.model.SettingsPreferences.computeEdgeTabAlpha(50),
+            miniBar.edgeTabContainer.alpha,
+            0.001f
+        )
+        assertEquals("tnum", miniBar.timerText.fontFeatureSettings)
+        assertEquals(1.0f, miniBar.scaleX, 0.001f)
+        assertEquals(android.view.WindowManager.LayoutParams.WRAP_CONTENT, miniBar.layoutParams.width)
+
+        // 4. Redimensionamento proporcional real + opacidade do NotificationMiniControlView
+        val miniControl = com.example.overlay.NotificationMiniControlView(
+            context = context,
+            windowManager = wm,
+            onTogglePauseResume = {},
+            onStopRecording = {},
+            onDismissMenu = {},
+            initialSizePercent = 80,
+            initialOpacityPercent = 100
+        )
+        val closeWidthAt80 = miniControl.btnCloseMenu.layoutParams.width
+        val btnPadAt80 = miniControl.btnPauseResume.paddingLeft
+        val timerTextSizeAt80 = miniControl.timerText.textSize
+        miniControl.applyStyle(150, 75)
+        val closeWidthAt150 = miniControl.btnCloseMenu.layoutParams.width
+        val btnPadAt150 = miniControl.btnPauseResume.paddingLeft
+        val timerTextSizeAt150 = miniControl.timerText.textSize
+        assertEquals(150, miniControl.currentSizePercent)
+        assertEquals(75, miniControl.currentOpacityPercent)
+        assertEquals(true, closeWidthAt150 > closeWidthAt80)
+        assertEquals(true, btnPadAt150 > btnPadAt80)
+        assertEquals(true, timerTextSizeAt150 > timerTextSizeAt80)
+        assertEquals(0.75f, miniControl.cardContainer.alpha, 0.001f)
+        assertEquals("tnum", miniControl.timerText.fontFeatureSettings)
+        assertEquals(1.0f, miniControl.scaleX, 0.001f)
+        assertEquals(android.view.WindowManager.LayoutParams.WRAP_CONTENT, miniControl.layoutParams.width)
+    }
 }
 
 

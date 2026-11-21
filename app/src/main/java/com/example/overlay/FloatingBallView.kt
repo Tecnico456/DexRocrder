@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -18,9 +19,11 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.R
 import com.example.model.RecordingStatus
+import com.example.model.SettingsPreferences
 import com.example.service.ScreenRecordingService
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 @SuppressLint("ViewConstructor")
 class FloatingBallView(
@@ -29,10 +32,16 @@ class FloatingBallView(
     private val onStartRecording: () -> Unit,
     private val onToggleBrush: () -> Unit,
     private val onToggleFacecam: () -> Unit,
-    private val onCloseBall: () -> Unit
+    private val onCloseBall: () -> Unit,
+    initialSizePercent: Int = SettingsPreferences.DEFAULT_BUBBLE_SIZE_PERCENT
 ) : FrameLayout(context) {
 
-    private val ballSize = dpToPx(56)
+    var currentSizePercent: Int = SettingsPreferences.sanitizeSizePercent(initialSizePercent)
+        private set
+
+    private val bubbleScale: Float
+        get() = currentSizePercent / 100f
+
     private val closeTargetSize = dpToPx(68)
 
     val layoutParams = WindowManager.LayoutParams(
@@ -59,12 +68,12 @@ class FloatingBallView(
     }
 
     private val bubbleWrapper = FrameLayout(context)
-    private val bubbleContainer = FrameLayout(context)
+    val bubbleContainer = FrameLayout(context)
     private val bubbleIcon = ImageView(context)
-    private val quickCloseBadge = TextView(context)
+    val quickCloseBadge = TextView(context)
     val menuContainer = LinearLayout(context)
 
-    // Action buttons in the expanded bar (TAREFA 1, 2 & 3)
+    // Action buttons in the expanded bar
     lateinit var btnRecord: ImageButton
         private set
     lateinit var btnPauseResume: ImageButton
@@ -98,68 +107,35 @@ class FloatingBallView(
 
     init {
         setupViews()
+        applySizePercent(currentSizePercent)
         setupCloseTargetView()
         setupTouch()
         updateRecordingState(ScreenRecordingService.recordingStatus.value)
     }
 
     private fun setupViews() {
-        // Main circular bubble
-        val bgDrawable = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(0xFFE50914.toInt()) // Sleek crimson red
-            setStroke(dpToPx(2), Color.WHITE)
-        }
-        bubbleContainer.background = bgDrawable
-        val bubbleLp = LayoutParams(ballSize, ballSize).apply {
-            topMargin = dpToPx(4)
-            rightMargin = dpToPx(4)
-        }
-        bubbleContainer.layoutParams = bubbleLp
-
         bubbleIcon.setImageResource(android.R.drawable.ic_btn_speak_now)
         bubbleIcon.setColorFilter(Color.WHITE)
-        bubbleIcon.setPadding(dpToPx(12), dpToPx(12), dpToPx(12), dpToPx(12))
+        bubbleIcon.scaleType = ImageView.ScaleType.FIT_CENTER
         bubbleContainer.addView(
             bubbleIcon,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         )
 
-        // Botão "X" direto ao lado/topo da bola flutuante para fechar com 1 toque
-        val badgeBg = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(0xFF1E1B2E.toInt())
-            setStroke(dpToPx(1), Color.WHITE)
-        }
-        quickCloseBadge.background = badgeBg
         quickCloseBadge.text = "✕"
         quickCloseBadge.setTextColor(Color.WHITE)
-        quickCloseBadge.textSize = 11f
         quickCloseBadge.typeface = Typeface.DEFAULT_BOLD
         quickCloseBadge.gravity = Gravity.CENTER
         quickCloseBadge.contentDescription = "Fechar Bola Flutuante"
-        val badgeSize = dpToPx(22)
-        val badgeLp = LayoutParams(badgeSize, badgeSize).apply {
-            gravity = Gravity.TOP or Gravity.END
-        }
         quickCloseBadge.setOnClickListener {
             onCloseBall()
         }
 
         bubbleWrapper.addView(bubbleContainer)
-        bubbleWrapper.addView(quickCloseBadge, badgeLp)
+        bubbleWrapper.addView(quickCloseBadge)
 
-        // Menu panel
         menuContainer.orientation = LinearLayout.HORIZONTAL
         menuContainer.gravity = Gravity.CENTER_VERTICAL
-        val menuBg = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dpToPx(28).toFloat()
-            setColor(0xEE1E1B2E.toInt())
-            setStroke(dpToPx(1), 0x44FFFFFF)
-        }
-        menuContainer.background = menuBg
-        menuContainer.setPadding(dpToPx(8), dpToPx(4), dpToPx(8), dpToPx(4))
         menuContainer.visibility = View.GONE
 
         // 1. Botão de Gravar (Record) - visível quando !isRecording
@@ -217,7 +193,6 @@ class FloatingBallView(
             onCloseBall()
         }
 
-        // TAREFA 1 & 3: Apenas os botões necessários (sem FastRewind/<< e sem Crosshair/Compass)
         menuContainer.addView(btnRecord)
         menuContainer.addView(btnPauseResume)
         menuContainer.addView(btnStop)
@@ -236,7 +211,115 @@ class FloatingBallView(
     }
 
     /**
-     * TAREFA 2: Atualiza dinamicamente os botões de Gravar, Pausar/Continuar e Parar
+     * TAREFA 3: Redimensionamento proporcional real em dp/sp (sem scaleX/scaleY que corta bordas no WindowManager).
+     * Atualiza bolinha recolhida, ícone, badge "✕", container do menu expandido e todos os botões de ação,
+     * recalculando WRAP_CONTENT + clamping seguro dentro dos limites da tela.
+     */
+    fun applySizePercent(sizePercent: Int) {
+        currentSizePercent = SettingsPreferences.sanitizeSizePercent(sizePercent)
+        val s = bubbleScale
+
+        val ballSizePx = scaledDp(56, s)
+        val bubbleMargin = scaledDp(4, s)
+        val bubbleStroke = scaledDp(2, s).coerceAtLeast(1)
+        val bubbleBg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0xFFE50914.toInt())
+            setStroke(bubbleStroke, Color.WHITE)
+        }
+        bubbleContainer.background = bubbleBg
+        bubbleContainer.layoutParams = LayoutParams(ballSizePx, ballSizePx).apply {
+            topMargin = bubbleMargin
+            rightMargin = bubbleMargin
+        }
+        val iconPad = scaledDp(12, s)
+        bubbleIcon.setPadding(iconPad, iconPad, iconPad, iconPad)
+
+        // Badge "✕" na borda superior direita da bola
+        val badgeSizePx = scaledDp(22, s)
+        val badgeStroke = scaledDp(1, s).coerceAtLeast(1)
+        quickCloseBadge.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0xFF1E1B2E.toInt())
+            setStroke(badgeStroke, Color.WHITE)
+        }
+        quickCloseBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f * s)
+        quickCloseBadge.layoutParams = LayoutParams(badgeSizePx, badgeSizePx).apply {
+            gravity = Gravity.TOP or Gravity.END
+        }
+
+        // Menu expandido
+        val menuCorner = scaledDp(28, s).toFloat()
+        val menuPadH = scaledDp(8, s)
+        val menuPadV = scaledDp(4, s)
+        menuContainer.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = menuCorner
+            setColor(0xEE1E1B2E.toInt())
+            setStroke(scaledDp(1, s).coerceAtLeast(1), 0x44FFFFFF)
+        }
+        menuContainer.setPadding(menuPadH, menuPadV, menuPadH, menuPadV)
+        menuContainer.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            leftMargin = scaledDp(4, s)
+        }
+
+        // Botões de ação proporcionais
+        val actionBtnSize = scaledDp(38, s)
+        val actionMarginH = scaledDp(4, s)
+        val actionPad = scaledDp(8, s)
+        val actionStroke = scaledDp(1, s).coerceAtLeast(1)
+
+        btnRecord.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0x33FF1744)
+            setStroke(actionStroke, 0xFFFF5252.toInt())
+        }
+        applyButtonDimensions(btnRecord, actionBtnSize, actionMarginH, actionMarginH, actionPad)
+
+        btnStop.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0x33FF5252)
+            setStroke(actionStroke, 0xFFFF5252.toInt())
+        }
+        applyButtonDimensions(btnStop, actionBtnSize, actionMarginH, actionMarginH, actionPad)
+
+        applyButtonDimensions(btnPauseResume, actionBtnSize, actionMarginH, actionMarginH, actionPad)
+        applyButtonDimensions(btnBrush, actionBtnSize, actionMarginH, actionMarginH, actionPad)
+        applyButtonDimensions(btnFacecam, actionBtnSize, actionMarginH, actionMarginH, actionPad)
+
+        val closeBtnSize = scaledDp(36, s)
+        btnCloseBall.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0xFFE50914.toInt())
+            setStroke(actionStroke, Color.WHITE)
+        }
+        applyButtonDimensions(btnCloseBall, closeBtnSize, scaledDp(6, s), scaledDp(2, s), actionPad)
+
+        requestLayout()
+        clampPositionToScreen()
+        safeUpdateWindowLayout()
+    }
+
+    private fun applyButtonDimensions(
+        button: ImageButton,
+        sizePx: Int,
+        marginLeftPx: Int,
+        marginRightPx: Int,
+        paddingPx: Int
+    ) {
+        button.layoutParams = LinearLayout.LayoutParams(sizePx, sizePx).apply {
+            leftMargin = marginLeftPx
+            rightMargin = marginRightPx
+        }
+        button.scaleType = ImageView.ScaleType.FIT_CENTER
+        button.setPadding(paddingPx, paddingPx, paddingPx, paddingPx)
+    }
+
+    /**
+     * Atualiza dinamicamente os botões de Gravar, Pausar/Continuar e Parar
      * em tempo real de acordo com o estado do ScreenRecordingService.
      */
     fun updateRecordingState(status: RecordingStatus) {
@@ -249,23 +332,19 @@ class FloatingBallView(
         isPausedState = paused
 
         if (!activeRecording) {
-            // Não está gravando: exibe botão Gravar (Record) e oculta Pausar/Continuar e Parar
             btnRecord.visibility = View.VISIBLE
             btnPauseResume.visibility = View.GONE
             btnStop.visibility = View.GONE
         } else {
-            // Está gravando (ou pausado): oculta botão Gravar e exibe Pausar/Continuar + Parar
             btnRecord.visibility = View.GONE
             btnPauseResume.visibility = View.VISIBLE
             btnStop.visibility = View.VISIBLE
 
             if (paused) {
-                // Enquanto estiver pausado (isPaused): exibe ícone Play ("Continuar")
                 btnPauseResume.setImageResource(android.R.drawable.ic_media_play)
-                btnPauseResume.setColorFilter(0xFF00E676.toInt()) // Verde destaque para retomar
+                btnPauseResume.setColorFilter(0xFF00E676.toInt())
                 btnPauseResume.contentDescription = "Continuar Gravação"
             } else {
-                // Enquanto estiver gravando (!isPaused): exibe ícone Pause ("Pausar")
                 btnPauseResume.setImageResource(android.R.drawable.ic_media_pause)
                 btnPauseResume.setColorFilter(Color.WHITE)
                 btnPauseResume.contentDescription = "Pausar Gravação"
@@ -281,10 +360,6 @@ class FloatingBallView(
         btnFacecam.setColorFilter(if (facecamActive) 0xFF00E5FF.toInt() else Color.WHITE)
     }
 
-    /**
-     * Configura o alvo de fechamento (ícone "X" dentro de um círculo vermelho)
-     * exibido na parte inferior central da tela durante o arraste.
-     */
     private fun setupCloseTargetView() {
         closeTargetOverlay.orientation = LinearLayout.VERTICAL
         closeTargetOverlay.gravity = Gravity.CENTER_HORIZONTAL
@@ -292,7 +367,7 @@ class FloatingBallView(
 
         val targetCircleBg = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
-            setColor(0xFFE50914.toInt()) // Círculo vermelho
+            setColor(0xFFE50914.toInt())
             setStroke(dpToPx(2), Color.WHITE)
         }
         closeTargetCircle.background = targetCircleBg
@@ -323,47 +398,19 @@ class FloatingBallView(
     }
 
     private fun createRecordButton(onClick: () -> Unit): ImageButton {
-        val recRingBg = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(0x33FF1744)
-            setStroke(dpToPx(1), 0xFFFF5252.toInt())
-        }
         return ImageButton(context).apply {
             setImageResource(R.drawable.ic_notification_rec)
-            background = recRingBg
-            setColorFilter(0xFFFF1744.toInt()) // Círculo vermelho de gravação
+            setColorFilter(0xFFFF1744.toInt())
             contentDescription = "Iniciar Gravação"
-            val size = dpToPx(38)
-            val lp = LinearLayout.LayoutParams(size, size).apply {
-                leftMargin = dpToPx(4)
-                rightMargin = dpToPx(4)
-            }
-            layoutParams = lp
-            val pad = dpToPx(8)
-            setPadding(pad, pad, pad, pad)
             setOnClickListener { onClick() }
         }
     }
 
     private fun createStopButton(onClick: () -> Unit): ImageButton {
-        val stopBg = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(0x33FF5252)
-            setStroke(dpToPx(1), 0xFFFF5252.toInt())
-        }
         return ImageButton(context).apply {
             setImageResource(R.drawable.ic_stop_square)
-            background = stopBg
             setColorFilter(0xFFFF5252.toInt())
             contentDescription = "Parar Gravação"
-            val size = dpToPx(38)
-            val lp = LinearLayout.LayoutParams(size, size).apply {
-                leftMargin = dpToPx(4)
-                rightMargin = dpToPx(4)
-            }
-            layoutParams = lp
-            val pad = dpToPx(8)
-            setPadding(pad, pad, pad, pad)
             setOnClickListener { onClick() }
         }
     }
@@ -378,31 +425,15 @@ class FloatingBallView(
             setBackgroundColor(Color.TRANSPARENT)
             setColorFilter(Color.WHITE)
             contentDescription = contentDesc
-            val pad = dpToPx(10)
-            setPadding(pad, pad, pad, pad)
             setOnClickListener { onClick() }
         }
     }
 
     private fun createCloseMenuButton(onClick: () -> Unit): ImageButton {
-        val closeCircleBg = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(0xFFE50914.toInt())
-            setStroke(dpToPx(1), Color.WHITE)
-        }
         return ImageButton(context).apply {
             setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
-            background = closeCircleBg
             setColorFilter(Color.WHITE)
             contentDescription = "Fechar Bola Flutuante"
-            val size = dpToPx(36)
-            val lp = LinearLayout.LayoutParams(size, size).apply {
-                leftMargin = dpToPx(6)
-                rightMargin = dpToPx(2)
-            }
-            layoutParams = lp
-            val pad = dpToPx(8)
-            setPadding(pad, pad, pad, pad)
             setOnClickListener { onClick() }
         }
     }
@@ -430,11 +461,9 @@ class FloatingBallView(
                         }
                         layoutParams.x = initialX + dx
                         layoutParams.y = initialY + dy
-                        try {
-                            windowManager.updateViewLayout(this@FloatingBallView, layoutParams)
-                        } catch (_: Exception) {}
+                        clampPositionToScreen()
+                        safeUpdateWindowLayout()
 
-                        // Destaca visualmente o círculo vermelho quando a bola está sobre a área de fechamento
                         val hoveringClose = isInsideCloseTarget(event.rawX, event.rawY)
                         highlightCloseTarget(hoveringClose)
                     }
@@ -458,6 +487,34 @@ class FloatingBallView(
         }
     }
 
+    fun clampPositionToScreen() {
+        val metrics = context.resources.displayMetrics
+        val screenW = metrics.widthPixels.coerceAtLeast(dpToPx(320))
+        val screenH = metrics.heightPixels.coerceAtLeast(dpToPx(320))
+
+        val s = bubbleScale
+        val estBubbleTotal = scaledDp(60, s)
+        val estWidth = if (width > 0) {
+            width
+        } else if (isMenuExpanded) {
+            estBubbleTotal + scaledDp(240, s)
+        } else {
+            estBubbleTotal
+        }
+        val estHeight = if (height > 0) height else estBubbleTotal
+
+        layoutParams.x = layoutParams.x.coerceIn(0, (screenW - estWidth).coerceAtLeast(0))
+        layoutParams.y = layoutParams.y.coerceIn(0, (screenH - estHeight).coerceAtLeast(0))
+    }
+
+    private fun safeUpdateWindowLayout() {
+        if (isAttachedToWindow) {
+            try {
+                windowManager.updateViewLayout(this, layoutParams)
+            } catch (_: Exception) {}
+        }
+    }
+
     /**
      * Verifica se as coordenadas (rawX, rawY) estão sobre a área de fechamento inferior central.
      */
@@ -466,7 +523,6 @@ class FloatingBallView(
         val screenWidth = metrics.widthPixels.toFloat()
         val screenHeight = metrics.heightPixels.toFloat()
 
-        // Centro estimado do alvo inferior central
         var targetCenterX = screenWidth / 2f
         var targetCenterY = screenHeight - dpToPx(48) - (closeTargetSize / 2f)
 
@@ -512,21 +568,27 @@ class FloatingBallView(
             updateRecordingState(ScreenRecordingService.recordingStatus.value)
         }
         menuContainer.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
+        clampPositionToScreen()
+        safeUpdateWindowLayout()
     }
 
     fun collapseMenu() {
         isMenuExpanded = false
         menuContainer.visibility = View.GONE
+        safeUpdateWindowLayout()
     }
 
     fun setBallAlpha(alphaValue: Float) {
-        alpha = alphaValue
+        alpha = alphaValue.coerceIn(0.2f, 1.0f)
     }
 
     private fun dpToPx(dp: Int): Int {
-        val scale = context.resources.displayMetrics.density
-        return (dp * scale + 0.5f).toInt()
+        val density = context.resources.displayMetrics.density
+        return (dp * density + 0.5f).toInt()
+    }
+
+    private fun scaledDp(baseDp: Int, scale: Float): Int {
+        val density = context.resources.displayMetrics.density
+        return (baseDp * scale * density).roundToInt().coerceAtLeast(1)
     }
 }
-
-

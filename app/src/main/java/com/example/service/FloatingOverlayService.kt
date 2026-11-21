@@ -40,6 +40,8 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         const val ACTION_TOGGLE_BRUSH = "com.example.action.TOGGLE_BRUSH"
         const val ACTION_TOGGLE_FACECAM = "com.example.action.TOGGLE_FACECAM"
         const val ACTION_UPDATE_OPACITY = "com.example.action.UPDATE_OPACITY"
+        const val ACTION_UPDATE_BUBBLE_SIZE = "com.example.action.UPDATE_BUBBLE_SIZE"
+        const val ACTION_UPDATE_MINI_BAR_STYLE = "com.example.action.UPDATE_MINI_BAR_STYLE"
         const val ACTION_CLOSE_ALL = "com.example.action.CLOSE_ALL_OVERLAYS"
         const val ACTION_SYNC_MINI_BAR = "com.example.action.SYNC_MINI_BAR"
         const val ACTION_HIDE_MINI_BAR = "com.example.action.HIDE_MINI_BAR"
@@ -47,6 +49,9 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         const val ACTION_HIDE_MINI_CONTROL = "com.example.action.HIDE_MINI_CONTROL"
 
         const val EXTRA_OPACITY = "extra_opacity"
+        const val EXTRA_BUBBLE_SIZE_PERCENT = "extra_bubble_size_percent"
+        const val EXTRA_MINI_BAR_SIZE_PERCENT = "extra_mini_bar_size_percent"
+        const val EXTRA_MINI_BAR_OPACITY_PERCENT = "extra_mini_bar_opacity_percent"
 
         private val _floatingBallVisibleFlow = MutableStateFlow(false)
         val floatingBallVisibleFlow: StateFlow<Boolean> = _floatingBallVisibleFlow.asStateFlow()
@@ -119,6 +124,8 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         super.onCreate()
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        // Carrega preferências persistidas com limites seguros (coerceIn) logo na inicialização do serviço
+        ScreenRecordingService.currentSettings = SettingsPreferences.load(this)
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
         lifecycleRegistry.currentState = Lifecycle.State.RESUMED
 
@@ -207,6 +214,31 @@ class FloatingOverlayService : Service(), LifecycleOwner {
                 val opacity = intent.getFloatExtra(EXTRA_OPACITY, 0.85f)
                 floatingBallView?.setBallAlpha(opacity)
             }
+            ACTION_UPDATE_BUBBLE_SIZE -> {
+                val sizePercent = SettingsPreferences.sanitizeSizePercent(
+                    intent.getIntExtra(
+                        EXTRA_BUBBLE_SIZE_PERCENT,
+                        ScreenRecordingService.currentSettings.floatingBubbleSizePercent
+                    )
+                )
+                floatingBallView?.applySizePercent(sizePercent)
+            }
+            ACTION_UPDATE_MINI_BAR_STYLE -> {
+                val sizePercent = SettingsPreferences.sanitizeSizePercent(
+                    intent.getIntExtra(
+                        EXTRA_MINI_BAR_SIZE_PERCENT,
+                        ScreenRecordingService.currentSettings.dexMiniBarSizePercent
+                    )
+                )
+                val opacityPercent = SettingsPreferences.sanitizeMiniBarOpacityPercent(
+                    intent.getIntExtra(
+                        EXTRA_MINI_BAR_OPACITY_PERCENT,
+                        ScreenRecordingService.currentSettings.dexMiniBarOpacityPercent
+                    )
+                )
+                dexMiniBarView?.applyStyle(sizePercent, opacityPercent)
+                miniControlView?.applyStyle(sizePercent, opacityPercent)
+            }
             ACTION_SYNC_MINI_BAR -> syncDexMiniBar()
             ACTION_SHOW_MINI_CONTROL -> showNotificationMiniControl()
             else -> showFloatingBall()
@@ -236,9 +268,11 @@ class FloatingOverlayService : Service(), LifecycleOwner {
 
     private fun showDexMiniBar() {
         val wm = windowManager ?: return
+        val settings = ScreenRecordingService.currentSettings
         val existing = dexMiniBarView
         if (existing != null) {
-            existing.updateCollapseBehavior(ScreenRecordingService.currentSettings.miniBarCollapseBehavior)
+            existing.updateCollapseBehavior(settings.miniBarCollapseBehavior)
+            existing.applyStyle(settings.dexMiniBarSizePercent, settings.dexMiniBarOpacityPercent)
             existing.updateRecordingState(ScreenRecordingService.recordingStatus.value)
             isDexMiniBarVisible = true
             _dexMiniBarVisibleFlow.value = true
@@ -248,14 +282,16 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         val miniBar = DexMiniBarView(
             context = this,
             windowManager = wm,
-            initialCollapseBehavior = ScreenRecordingService.currentSettings.miniBarCollapseBehavior,
+            initialCollapseBehavior = settings.miniBarCollapseBehavior,
             onTogglePauseResume = { sendPauseOrResumeToRecordingService() },
             onStopRecording = { sendStopToRecordingService() },
             onHideUntilNotificationTap = {
                 dexMiniBarHiddenByUser = true
                 removeDexMiniBarOverlay()
                 stopSelfIfIdle()
-            }
+            },
+            initialSizePercent = settings.dexMiniBarSizePercent,
+            initialOpacityPercent = settings.dexMiniBarOpacityPercent
         )
         miniBar.updateRecordingState(ScreenRecordingService.recordingStatus.value)
         try {
@@ -302,6 +338,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         // Remove e readiciona se já existir para garantir que venha para a frente (z-order superior)
         removeMiniControlOverlay()
 
+        val settings = ScreenRecordingService.currentSettings
         val menu = NotificationMiniControlView(
             context = this,
             windowManager = wm,
@@ -313,7 +350,9 @@ class FloatingOverlayService : Service(), LifecycleOwner {
             onDismissMenu = {
                 removeMiniControlOverlay()
                 stopSelfIfIdle()
-            }
+            },
+            initialSizePercent = settings.dexMiniBarSizePercent,
+            initialOpacityPercent = settings.dexMiniBarOpacityPercent
         )
         menu.updateRecordingState(ScreenRecordingService.recordingStatus.value)
         try {
@@ -378,6 +417,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
     }
 
     private fun showFloatingBall() {
+        val settings = ScreenRecordingService.currentSettings
         if (floatingBallView == null && windowManager != null) {
             val ball = FloatingBallView(
                 context = this,
@@ -385,9 +425,10 @@ class FloatingOverlayService : Service(), LifecycleOwner {
                 onStartRecording = { startRecordingFromOverlay() },
                 onToggleBrush = { toggleBrush() },
                 onToggleFacecam = { toggleFacecam() },
-                onCloseBall = { closeFloatingBallFromOverlay() }
+                onCloseBall = { closeFloatingBallFromOverlay() },
+                initialSizePercent = settings.floatingBubbleSizePercent
             )
-            ball.setBallAlpha(ScreenRecordingService.currentSettings.floatingBallOpacity)
+            ball.setBallAlpha(settings.floatingBallOpacity)
             ball.updateRecordingState(ScreenRecordingService.recordingStatus.value)
             ball.updateToolStates(isBrushActive, isFacecamActive)
             try {
@@ -401,6 +442,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
                 Log.e(tag, "Error adding floating ball view", e)
             }
         } else {
+            floatingBallView?.applySizePercent(settings.floatingBubbleSizePercent)
             floatingBallView?.updateRecordingState(ScreenRecordingService.recordingStatus.value)
             floatingBallView?.updateToolStates(isBrushActive, isFacecamActive)
             isFloatingBallVisible = floatingBallView != null

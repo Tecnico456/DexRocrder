@@ -127,11 +127,14 @@ data class RecordingSettings(
     val showFloatingBall: Boolean = true,
     val hideFloatingBallWhileRecording: Boolean = false,
     val floatingBallOpacity: Float = 0.85f,
+    val floatingBubbleSizePercent: Int = SettingsPreferences.DEFAULT_BUBBLE_SIZE_PERCENT,
     val enableFacecam: Boolean = false,
     val enableBrush: Boolean = false,
     val useHevcCodec: Boolean = false, // H.265 vs H.264
     val dexMiniBarMode: DexMiniBarMode = DexMiniBarMode.DEX_ONLY,
     val miniBarCollapseBehavior: MiniBarCollapseBehavior = MiniBarCollapseBehavior.COLLAPSE_TO_EDGE_TAB,
+    val dexMiniBarSizePercent: Int = SettingsPreferences.DEFAULT_MINI_BAR_SIZE_PERCENT,
+    val dexMiniBarOpacityPercent: Int = SettingsPreferences.DEFAULT_MINI_BAR_OPACITY_PERCENT,
     val notificationStyle: NotificationControlStyle = NotificationControlStyle.CUSTOM,
     val notificationTapOpensMiniControl: Boolean = true
 ) {
@@ -165,6 +168,33 @@ fun createConfiguredScreenCaptureIntent(
 object SettingsPreferences {
     const val PREFS_NAME = "dexrecorder_prefs"
 
+    const val MIN_SIZE_PERCENT = 80
+    const val MAX_SIZE_PERCENT = 180
+    const val DEFAULT_BUBBLE_SIZE_PERCENT = 120
+    const val DEFAULT_MINI_BAR_SIZE_PERCENT = 120
+
+    const val MIN_MINI_BAR_OPACITY_PERCENT = 25
+    const val MAX_MINI_BAR_OPACITY_PERCENT = 100
+    const val DEFAULT_MINI_BAR_OPACITY_PERCENT = 90
+    const val SLIDER_STEP_PERCENT = 5
+
+    fun sanitizeSizePercent(value: Int): Int {
+        val clamped = value.coerceIn(MIN_SIZE_PERCENT, MAX_SIZE_PERCENT)
+        val snapped = ((clamped + SLIDER_STEP_PERCENT / 2) / SLIDER_STEP_PERCENT) * SLIDER_STEP_PERCENT
+        return snapped.coerceIn(MIN_SIZE_PERCENT, MAX_SIZE_PERCENT)
+    }
+
+    fun sanitizeMiniBarOpacityPercent(value: Int): Int {
+        val clamped = value.coerceIn(MIN_MINI_BAR_OPACITY_PERCENT, MAX_MINI_BAR_OPACITY_PERCENT)
+        val snapped = ((clamped + SLIDER_STEP_PERCENT / 2) / SLIDER_STEP_PERCENT) * SLIDER_STEP_PERCENT
+        return snapped.coerceIn(MIN_MINI_BAR_OPACITY_PERCENT, MAX_MINI_BAR_OPACITY_PERCENT)
+    }
+
+    fun computeEdgeTabAlpha(opacityPercent: Int): Float {
+        val userAlpha = sanitizeMiniBarOpacityPercent(opacityPercent) / 100f
+        return minOf(userAlpha * 0.65f, 0.55f).coerceAtLeast(0.25f)
+    }
+
     private const val KEY_CAPTURE_MODE = "capture_mode"
     private const val KEY_RESOLUTION = "resolution"
     private const val KEY_FPS = "fps"
@@ -176,11 +206,14 @@ object SettingsPreferences {
     private const val KEY_SHOW_FLOATING_BALL = "show_floating_ball"
     private const val KEY_HIDE_BALL_WHILE_RECORDING = "hide_floating_ball_while_recording"
     private const val KEY_FLOATING_BALL_OPACITY = "floating_ball_opacity"
+    private const val KEY_FLOATING_BUBBLE_SIZE_PERCENT = "floating_bubble_size_percent"
     private const val KEY_ENABLE_FACECAM = "enable_facecam"
     private const val KEY_ENABLE_BRUSH = "enable_brush"
     private const val KEY_USE_HEVC_CODEC = "use_hevc_codec"
     private const val KEY_DEX_MINI_BAR_MODE = "dex_mini_bar_mode"
     private const val KEY_MINI_BAR_COLLAPSE_BEHAVIOR = "mini_bar_collapse_behavior"
+    private const val KEY_DEX_MINI_BAR_SIZE_PERCENT = "dex_mini_bar_size_percent"
+    private const val KEY_DEX_MINI_BAR_OPACITY_PERCENT = "dex_mini_bar_opacity_percent"
     private const val KEY_NOTIFICATION_STYLE = "notification_style"
     private const val KEY_NOTIFICATION_TAP_MINI_CONTROL = "notification_tap_opens_mini_control"
     private const val KEY_MINI_BAR_POS_X = "dex_mini_bar_pos_x"
@@ -201,11 +234,14 @@ object SettingsPreferences {
             putBoolean(KEY_SHOW_FLOATING_BALL, settings.showFloatingBall)
             putBoolean(KEY_HIDE_BALL_WHILE_RECORDING, settings.hideFloatingBallWhileRecording)
             putFloat(KEY_FLOATING_BALL_OPACITY, settings.floatingBallOpacity)
+            putInt(KEY_FLOATING_BUBBLE_SIZE_PERCENT, sanitizeSizePercent(settings.floatingBubbleSizePercent))
             putBoolean(KEY_ENABLE_FACECAM, settings.enableFacecam)
             putBoolean(KEY_ENABLE_BRUSH, settings.enableBrush)
             putBoolean(KEY_USE_HEVC_CODEC, settings.useHevcCodec)
             putString(KEY_DEX_MINI_BAR_MODE, settings.dexMiniBarMode.name)
             putString(KEY_MINI_BAR_COLLAPSE_BEHAVIOR, settings.miniBarCollapseBehavior.name)
+            putInt(KEY_DEX_MINI_BAR_SIZE_PERCENT, sanitizeSizePercent(settings.dexMiniBarSizePercent))
+            putInt(KEY_DEX_MINI_BAR_OPACITY_PERCENT, sanitizeMiniBarOpacityPercent(settings.dexMiniBarOpacityPercent))
             putString(KEY_NOTIFICATION_STYLE, settings.notificationStyle.name)
             putBoolean(KEY_NOTIFICATION_TAP_MINI_CONTROL, settings.notificationTapOpensMiniControl)
             apply()
@@ -239,6 +275,16 @@ object SettingsPreferences {
         val notifStyle = runCatching { NotificationControlStyle.valueOf(notifStyleName) }
             .getOrDefault(defaults.notificationStyle)
 
+        val bubbleSize = sanitizeSizePercent(
+            prefs.getInt(KEY_FLOATING_BUBBLE_SIZE_PERCENT, defaults.floatingBubbleSizePercent)
+        )
+        val miniBarSize = sanitizeSizePercent(
+            prefs.getInt(KEY_DEX_MINI_BAR_SIZE_PERCENT, defaults.dexMiniBarSizePercent)
+        )
+        val miniBarOpacity = sanitizeMiniBarOpacityPercent(
+            prefs.getInt(KEY_DEX_MINI_BAR_OPACITY_PERCENT, defaults.dexMiniBarOpacityPercent)
+        )
+
         return RecordingSettings(
             captureMode = captureMode,
             resolution = resolution,
@@ -253,12 +299,16 @@ object SettingsPreferences {
                 KEY_HIDE_BALL_WHILE_RECORDING,
                 defaults.hideFloatingBallWhileRecording
             ),
-            floatingBallOpacity = prefs.getFloat(KEY_FLOATING_BALL_OPACITY, defaults.floatingBallOpacity),
+            floatingBallOpacity = prefs.getFloat(KEY_FLOATING_BALL_OPACITY, defaults.floatingBallOpacity)
+                .coerceIn(0.2f, 1.0f),
+            floatingBubbleSizePercent = bubbleSize,
             enableFacecam = prefs.getBoolean(KEY_ENABLE_FACECAM, defaults.enableFacecam),
             enableBrush = prefs.getBoolean(KEY_ENABLE_BRUSH, defaults.enableBrush),
             useHevcCodec = prefs.getBoolean(KEY_USE_HEVC_CODEC, defaults.useHevcCodec),
             dexMiniBarMode = miniBarMode,
             miniBarCollapseBehavior = collapseBehavior,
+            dexMiniBarSizePercent = miniBarSize,
+            dexMiniBarOpacityPercent = miniBarOpacity,
             notificationStyle = notifStyle,
             notificationTapOpensMiniControl = prefs.getBoolean(
                 KEY_NOTIFICATION_TAP_MINI_CONTROL,

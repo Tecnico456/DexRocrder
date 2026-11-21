@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -21,14 +22,17 @@ import com.example.model.RecordingStatus
 import com.example.model.SettingsPreferences
 import com.example.service.ScreenRecordingService
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 /**
  * Mini Barra Flutuante compacta (Modo DeX e Celular):
  * - Pílula horizontal escura, discreta e arrastável para qualquer canto da tela.
+ * - Redimensionamento proporcional real em dp/sp (sem cortar bordas no WindowManager)
+ *   e opacidade configurável (25% a 100%, padrão 90%).
  * - Salva automaticamente a última posição arrastada no SharedPreferences.
- * - Exibe indicador colorido (vermelho gravando / amarelo pausado), cronômetro em tempo real,
+ * - Exibe indicador colorido (vermelho gravando / amarelo pausado), cronômetro tabular em tempo real,
  *   botão dinâmico Pausar (||) ⇄ Continuar (▶), botão Parar (■) e botão Recolher/Ocultar.
- * - Suporta recolhimento em pequena aba lateral semitransparente (reabrível com 1 toque)
+ * - Suporta recolhimento em pequena aba lateral semitransparente proporcional (reabrível com 1 toque)
  *   ou ocultação completa até o usuário tocar na notificação.
  */
 @SuppressLint("ViewConstructor")
@@ -38,11 +42,22 @@ class DexMiniBarView(
     initialCollapseBehavior: MiniBarCollapseBehavior,
     private val onTogglePauseResume: () -> Unit,
     private val onStopRecording: () -> Unit,
-    private val onHideUntilNotificationTap: () -> Unit
+    private val onHideUntilNotificationTap: () -> Unit,
+    initialSizePercent: Int = SettingsPreferences.DEFAULT_MINI_BAR_SIZE_PERCENT,
+    initialOpacityPercent: Int = SettingsPreferences.DEFAULT_MINI_BAR_OPACITY_PERCENT
 ) : FrameLayout(context) {
 
     var collapseBehavior: MiniBarCollapseBehavior = initialCollapseBehavior
         private set
+
+    var currentSizePercent: Int = SettingsPreferences.sanitizeSizePercent(initialSizePercent)
+        private set
+
+    var currentOpacityPercent: Int = SettingsPreferences.sanitizeMiniBarOpacityPercent(initialOpacityPercent)
+        private set
+
+    private val pillScale: Float
+        get() = currentSizePercent / 100f
 
     var isCollapsedToEdgeTab: Boolean = false
         private set
@@ -92,6 +107,7 @@ class DexMiniBarView(
         setupCollapsedEdgeTab()
         addView(pillContainer)
         addView(edgeTabContainer)
+        applyStyle(currentSizePercent, currentOpacityPercent)
         setupDragTouch(pillContainer, savePositionOnUp = true)
         setupEdgeTabTouch()
         updateRecordingState(ScreenRecordingService.recordingStatus.value)
@@ -101,8 +117,8 @@ class DexMiniBarView(
         val metrics = context.resources.displayMetrics
         val screenW = metrics.widthPixels.coerceAtLeast(dpToPx(320))
         val screenH = metrics.heightPixels.coerceAtLeast(dpToPx(320))
-        val estimatedBarWidth = dpToPx(220)
-        val estimatedBarHeight = dpToPx(46)
+        val estimatedBarWidth = scaledDp(220, pillScale)
+        val estimatedBarHeight = scaledDp(46, pillScale)
 
         val saved = SettingsPreferences.loadDexMiniBarPosition(context)
         return if (saved != null) {
@@ -110,7 +126,6 @@ class DexMiniBarView(
             val clampedY = saved.second.coerceIn(0, (screenH - estimatedBarHeight).coerceAtLeast(0))
             Pair(clampedX, clampedY)
         } else {
-            // Primeira execução: centralizado no topo da tela
             val centerX = ((screenW - estimatedBarWidth) / 2).coerceAtLeast(dpToPx(12))
             val topY = dpToPx(24)
             Pair(centerX, topY)
@@ -120,78 +135,40 @@ class DexMiniBarView(
     private fun setupExpandedPill() {
         pillContainer.orientation = LinearLayout.HORIZONTAL
         pillContainer.gravity = Gravity.CENTER_VERTICAL
-        pillContainer.background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dpToPx(24).toFloat()
-            setColor(0xEB141820.toInt())
-            setStroke(dpToPx(1), 0x44FFFFFF)
-        }
         pillContainer.elevation = dpToPx(8).toFloat()
-        pillContainer.setPadding(dpToPx(12), dpToPx(6), dpToPx(8), dpToPx(6))
 
-        // Ponto indicador de status (vermelho gravando / amarelo pausado)
         statusDot.background = makeCircleDrawable(0xFFFF3B30.toInt())
-        pillContainer.addView(
-            statusDot,
-            LinearLayout.LayoutParams(dpToPx(10), dpToPx(10)).apply {
-                marginEnd = dpToPx(8)
-            }
-        )
+        pillContainer.addView(statusDot)
 
-        // Cronômetro em tempo real (00:00) com dígitos monoespaçados para evitar trepidação
         timerText.text = "00:00"
         timerText.setTextColor(Color.WHITE)
-        timerText.textSize = 13f
         timerText.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        timerText.fontFeatureSettings = "tnum"
         timerText.contentDescription = "Tempo de gravação"
-        pillContainer.addView(
-            timerText,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginEnd = dpToPx(10)
-            }
-        )
+        pillContainer.addView(timerText)
 
-        // Botão dinâmico Pausar (||) ⇄ Continuar (▶)
-        configureCircleButton(
-            button = btnPauseResume,
-            sizeDp = 32,
-            bgColor = 0xFF283040.toInt(),
-            iconRes = R.drawable.ic_notif_pause,
-            contentDesc = "Pausar Gravação",
-            marginEndDp = 6
-        )
+        btnPauseResume.setImageResource(R.drawable.ic_notif_pause)
+        btnPauseResume.setColorFilter(Color.WHITE)
+        btnPauseResume.scaleType = ImageView.ScaleType.FIT_CENTER
+        btnPauseResume.contentDescription = "Pausar Gravação"
         btnPauseResume.setOnClickListener {
             onTogglePauseResume()
         }
         pillContainer.addView(btnPauseResume)
 
-        // Botão Parar (■)
-        configureCircleButton(
-            button = btnStop,
-            sizeDp = 32,
-            bgColor = 0xFFE50914.toInt(),
-            iconRes = R.drawable.ic_stop_square,
-            contentDesc = "Parar Gravação",
-            marginEndDp = 6
-        )
+        btnStop.setImageResource(R.drawable.ic_stop_square)
+        btnStop.setColorFilter(Color.WHITE)
+        btnStop.scaleType = ImageView.ScaleType.FIT_CENTER
+        btnStop.contentDescription = "Parar Gravação"
         btnStop.setOnClickListener {
             onStopRecording()
         }
         pillContainer.addView(btnStop)
 
-        // Botão discreto para Recolher em aba lateral / Ocultar
-        configureCircleButton(
-            button = btnCollapseOrHide,
-            sizeDp = 28,
-            bgColor = 0x24FFFFFF,
-            iconRes = android.R.drawable.ic_menu_close_clear_cancel,
-            contentDesc = collapseButtonContentDescription(),
-            marginEndDp = 0
-        )
+        btnCollapseOrHide.setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
         btnCollapseOrHide.setColorFilter(0xCCCFD8DC.toInt())
+        btnCollapseOrHide.scaleType = ImageView.ScaleType.FIT_CENTER
+        btnCollapseOrHide.contentDescription = collapseButtonContentDescription()
         btnCollapseOrHide.setOnClickListener {
             handleCollapseOrHideClick()
         }
@@ -201,23 +178,15 @@ class DexMiniBarView(
     private fun setupCollapsedEdgeTab() {
         edgeTabContainer.orientation = LinearLayout.VERTICAL
         edgeTabContainer.gravity = Gravity.CENTER
-        edgeTabContainer.alpha = 0.52f
-        edgeTabContainer.setPadding(dpToPx(6), dpToPx(8), dpToPx(6), dpToPx(8))
         edgeTabContainer.visibility = View.GONE
         edgeTabContainer.contentDescription = "Expandir Mini Barra Flutuante"
         edgeTabContainer.isClickable = true
 
         edgeStatusDot.background = makeCircleDrawable(0xFFFF3B30.toInt())
-        edgeTabContainer.addView(
-            edgeStatusDot,
-            LinearLayout.LayoutParams(dpToPx(7), dpToPx(7)).apply {
-                bottomMargin = dpToPx(4)
-            }
-        )
+        edgeTabContainer.addView(edgeStatusDot)
 
         edgeChevronText.text = "›"
         edgeChevronText.setTextColor(Color.WHITE)
-        edgeChevronText.textSize = 14f
         edgeChevronText.typeface = Typeface.DEFAULT_BOLD
         edgeChevronText.gravity = Gravity.CENTER
         edgeTabContainer.addView(
@@ -227,11 +196,91 @@ class DexMiniBarView(
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
-        applyEdgeTabBackground(onRightEdge = false)
+    }
+
+    /**
+     * TAREFA 3: Aplica escala proporcional real em dp/sp e opacidade na Pílula e na Aba Lateral Recolhida,
+     * mantendo WRAP_CONTENT e fazendo clamp seguro de (x, y) dentro das bordas da tela.
+     */
+    fun applyStyle(sizePercent: Int, opacityPercent: Int) {
+        currentSizePercent = SettingsPreferences.sanitizeSizePercent(sizePercent)
+        currentOpacityPercent = SettingsPreferences.sanitizeMiniBarOpacityPercent(opacityPercent)
+
+        val s = pillScale
+        val userAlpha = currentOpacityPercent / 100f
+        val edgeAlpha = SettingsPreferences.computeEdgeTabAlpha(currentOpacityPercent)
+
+        // 1. Pílula expandida
+        pillContainer.alpha = userAlpha
+        pillContainer.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = scaledDp(24, s).toFloat()
+            setColor(0xEB141820.toInt())
+            setStroke(scaledDp(1, s).coerceAtLeast(1), 0x44FFFFFF)
+        }
+        pillContainer.setPadding(
+            scaledDp(12, s),
+            scaledDp(6, s),
+            scaledDp(8, s),
+            scaledDp(6, s)
+        )
+
+        val dotSize = scaledDp(10, s)
+        statusDot.layoutParams = LinearLayout.LayoutParams(dotSize, dotSize).apply {
+            marginEnd = scaledDp(8, s)
+        }
+
+        timerText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * s)
+        timerText.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            marginEnd = scaledDp(10, s)
+        }
+
+        val actionSize = scaledDp(32, s)
+        val actionPad = scaledDp(7, s)
+        val actionGap = scaledDp(6, s)
+        btnPauseResume.background = makeCircleDrawable(0xFF283040.toInt())
+        btnPauseResume.layoutParams = LinearLayout.LayoutParams(actionSize, actionSize).apply {
+            marginEnd = actionGap
+        }
+        btnPauseResume.setPadding(actionPad, actionPad, actionPad, actionPad)
+
+        btnStop.background = makeCircleDrawable(0xFFE50914.toInt())
+        btnStop.layoutParams = LinearLayout.LayoutParams(actionSize, actionSize).apply {
+            marginEnd = actionGap
+        }
+        btnStop.setPadding(actionPad, actionPad, actionPad, actionPad)
+
+        val collapseSize = scaledDp(28, s)
+        val collapsePad = scaledDp(7, s)
+        btnCollapseOrHide.background = makeCircleDrawable(0x24FFFFFF)
+        btnCollapseOrHide.layoutParams = LinearLayout.LayoutParams(collapseSize, collapseSize)
+        btnCollapseOrHide.setPadding(collapsePad, collapsePad, collapsePad, collapsePad)
+
+        // 2. Aba Lateral Recolhida proporcional e discreta
+        edgeTabContainer.alpha = edgeAlpha
+        edgeTabContainer.setPadding(
+            scaledDp(6, s),
+            scaledDp(8, s),
+            scaledDp(6, s),
+            scaledDp(8, s)
+        )
+        val edgeDotSize = scaledDp(7, s)
+        edgeStatusDot.layoutParams = LinearLayout.LayoutParams(edgeDotSize, edgeDotSize).apply {
+            bottomMargin = scaledDp(4, s)
+        }
+        edgeChevronText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * s)
+        applyEdgeTabBackground(onRightEdge = collapsedOnRightEdge)
+
+        requestLayout()
+        clampPositionToScreen()
+        safeUpdateWindowLayout()
     }
 
     private fun applyEdgeTabBackground(onRightEdge: Boolean) {
-        val r = dpToPx(14).toFloat()
+        val r = scaledDp(14, pillScale).toFloat()
         val radii = if (onRightEdge) {
             floatArrayOf(r, r, 0f, 0f, 0f, 0f, r, r)
         } else {
@@ -241,30 +290,9 @@ class DexMiniBarView(
             shape = GradientDrawable.RECTANGLE
             cornerRadii = radii
             setColor(0xD9141820.toInt())
-            setStroke(dpToPx(1), 0x44FFFFFF)
+            setStroke(scaledDp(1, pillScale).coerceAtLeast(1), 0x44FFFFFF)
         }
         edgeChevronText.text = if (onRightEdge) "‹" else "›"
-    }
-
-    private fun configureCircleButton(
-        button: ImageButton,
-        sizeDp: Int,
-        bgColor: Int,
-        iconRes: Int,
-        contentDesc: String,
-        marginEndDp: Int
-    ) {
-        val sizePx = dpToPx(sizeDp)
-        button.layoutParams = LinearLayout.LayoutParams(sizePx, sizePx).apply {
-            marginEnd = dpToPx(marginEndDp)
-        }
-        button.background = makeCircleDrawable(bgColor)
-        button.setImageResource(iconRes)
-        button.setColorFilter(Color.WHITE)
-        button.scaleType = ImageView.ScaleType.CENTER_INSIDE
-        val pad = dpToPx(7)
-        button.setPadding(pad, pad, pad, pad)
-        button.contentDescription = contentDesc
     }
 
     private fun makeCircleDrawable(color: Int): GradientDrawable {
@@ -299,7 +327,7 @@ class DexMiniBarView(
         savedExpandedX = layoutParams.x
         savedExpandedY = layoutParams.y
 
-        val barWidth = if (pillContainer.width > 0) pillContainer.width else dpToPx(220)
+        val barWidth = if (pillContainer.width > 0) pillContainer.width else scaledDp(220, pillScale)
         val centerX = savedExpandedX + (barWidth / 2)
         collapsedOnRightEdge = centerX >= (screenW / 2)
 
@@ -308,9 +336,10 @@ class DexMiniBarView(
         edgeTabContainer.visibility = View.VISIBLE
         isCollapsedToEdgeTab = true
 
-        val tabWidth = dpToPx(26)
+        val tabWidth = scaledDp(26, pillScale)
         layoutParams.x = if (collapsedOnRightEdge) (screenW - tabWidth).coerceAtLeast(0) else 0
         layoutParams.y = savedExpandedY
+        clampPositionToScreen()
         safeUpdateWindowLayout()
     }
 
@@ -320,15 +349,30 @@ class DexMiniBarView(
         edgeTabContainer.visibility = View.GONE
         pillContainer.visibility = View.VISIBLE
 
+        layoutParams.x = savedExpandedX
+        layoutParams.y = savedExpandedY
+        clampPositionToScreen()
+        safeUpdateWindowLayout()
+    }
+
+    fun clampPositionToScreen() {
         val metrics = context.resources.displayMetrics
         val screenW = metrics.widthPixels.coerceAtLeast(dpToPx(320))
         val screenH = metrics.heightPixels.coerceAtLeast(dpToPx(320))
-        val estWidth = dpToPx(220)
-        val estHeight = dpToPx(46)
 
-        layoutParams.x = savedExpandedX.coerceIn(0, (screenW - estWidth).coerceAtLeast(0))
-        layoutParams.y = savedExpandedY.coerceIn(0, (screenH - estHeight).coerceAtLeast(0))
-        safeUpdateWindowLayout()
+        if (isCollapsedToEdgeTab) {
+            val tabWidth = scaledDp(26, pillScale)
+            val tabHeight = scaledDp(48, pillScale)
+            layoutParams.x = if (collapsedOnRightEdge) (screenW - tabWidth).coerceAtLeast(0) else 0
+            layoutParams.y = layoutParams.y.coerceIn(0, (screenH - tabHeight).coerceAtLeast(0))
+        } else {
+            val estWidth = if (pillContainer.width > 0) pillContainer.width else scaledDp(220, pillScale)
+            val estHeight = if (pillContainer.height > 0) pillContainer.height else scaledDp(46, pillScale)
+            layoutParams.x = layoutParams.x.coerceIn(0, (screenW - estWidth).coerceAtLeast(0))
+            layoutParams.y = layoutParams.y.coerceIn(0, (screenH - estHeight).coerceAtLeast(0))
+            savedExpandedX = layoutParams.x
+            savedExpandedY = layoutParams.y
+        }
     }
 
     fun updateRecordingState(status: RecordingStatus) {
@@ -452,5 +496,9 @@ class DexMiniBarView(
 
     private fun dpToPx(dp: Int): Int {
         return (dp * context.resources.displayMetrics.density).toInt()
+    }
+
+    private fun scaledDp(baseDp: Int, scale: Float): Int {
+        return (baseDp * scale * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
     }
 }

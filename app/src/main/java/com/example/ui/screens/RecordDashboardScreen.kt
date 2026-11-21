@@ -83,6 +83,7 @@ import com.example.model.RecordingSettings
 import com.example.model.RecordingStatus
 import com.example.model.ResolutionOption
 import com.example.model.ScreenCaptureMode
+import com.example.model.SettingsPreferences
 import com.example.service.FloatingOverlayService
 import com.example.service.ScreenRecordingService
 import com.example.ui.theme.CyanAccent
@@ -92,6 +93,7 @@ import com.example.ui.theme.RedSecondary
 import com.example.ui.theme.SuccessGreen
 import com.example.ui.theme.WarningAmber
 import com.example.viewmodel.MainViewModel
+import kotlin.math.roundToInt
 
 @Composable
 fun RecordDashboardScreen(
@@ -103,7 +105,7 @@ fun RecordDashboardScreen(
     val status by viewModel.recordingStatus.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
-    // TAREFA 3 & 4: Sincroniza o serviço da Bola Flutuante imediatamente com o estado de settings.showFloatingBall
+    // TAREFA 3 & 4: Sincroniza apenas a Bola Flutuante com settings.showFloatingBall sem encerrar outros overlays ativos
     LaunchedEffect(settings.showFloatingBall) {
         if (settings.showFloatingBall) {
             if (Settings.canDrawOverlays(context)) {
@@ -112,8 +114,11 @@ fun RecordDashboardScreen(
                 }
                 context.startService(intent)
             }
-        } else {
-            context.stopService(Intent(context, FloatingOverlayService::class.java))
+        } else if (FloatingOverlayService.isFloatingBallVisible) {
+            val hideIntent = Intent(context, FloatingOverlayService::class.java).apply {
+                action = FloatingOverlayService.ACTION_HIDE_BALL
+            }
+            context.startService(hideIntent)
         }
     }
 
@@ -160,7 +165,9 @@ fun RecordDashboardScreen(
             context = context,
             settings = settings,
             onToggleBall = { viewModel.toggleFloatingBall(context, it) },
-            onOpacityChange = { viewModel.updateFloatingOpacity(context, it) }
+            onOpacityChange = { viewModel.updateFloatingOpacity(context, it) },
+            onBubbleSizeChange = { viewModel.updateFloatingBubbleSize(context, it) },
+            onResetBubbleSize = { viewModel.resetFloatingBubbleSize(context) }
         )
     }
 }
@@ -679,7 +686,9 @@ private fun FloatingToolsCard(
     context: Context,
     settings: RecordingSettings,
     onToggleBall: (Boolean) -> Unit,
-    onOpacityChange: (Float) -> Unit
+    onOpacityChange: (Float) -> Unit,
+    onBubbleSizeChange: (Int) -> Unit,
+    onResetBubbleSize: () -> Unit
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
@@ -756,7 +765,47 @@ private fun FloatingToolsCard(
                         value = settings.floatingBallOpacity,
                         onValueChange = onOpacityChange,
                         valueRange = 0.2f..1.0f,
-                        colors = SliderDefaults.colors(thumbColor = RedPrimary, activeTrackColor = RedPrimary)
+                        colors = SliderDefaults.colors(thumbColor = RedPrimary, activeTrackColor = RedPrimary),
+                        modifier = Modifier.testTag("slider_floating_bubble_opacity")
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Tamanho da Bola: ${settings.floatingBubbleSizePercent}%",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        if (settings.floatingBubbleSizePercent != SettingsPreferences.DEFAULT_BUBBLE_SIZE_PERCENT) {
+                            Text(
+                                text = "Restaurar padrão (${SettingsPreferences.DEFAULT_BUBBLE_SIZE_PERCENT}%)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyanAccent,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { onResetBubbleSize() }
+                                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                                    .testTag("btn_reset_bubble_size")
+                            )
+                        }
+                    }
+                    Slider(
+                        value = settings.floatingBubbleSizePercent.toFloat(),
+                        onValueChange = { raw ->
+                            val snapped = SettingsPreferences.sanitizeSizePercent(raw.roundToInt())
+                            if (snapped != settings.floatingBubbleSizePercent) {
+                                onBubbleSizeChange(snapped)
+                            }
+                        },
+                        valueRange = SettingsPreferences.MIN_SIZE_PERCENT.toFloat()..SettingsPreferences.MAX_SIZE_PERCENT.toFloat(),
+                        steps = 19,
+                        colors = SliderDefaults.colors(thumbColor = RedPrimary, activeTrackColor = RedPrimary),
+                        modifier = Modifier.testTag("slider_floating_bubble_size")
                     )
 
                     Spacer(modifier = Modifier.height(10.dp))
