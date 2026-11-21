@@ -71,6 +71,50 @@ enum class AudioCaptureMode(val title: String, val description: String) {
     )
 }
 
+enum class DexMiniBarMode(val title: String, val shortLabel: String, val description: String) {
+    OFF(
+        "Desativada",
+        "Desativada",
+        "Não exibe a Mini Barra Flutuante durante a gravação."
+    ),
+    DEX_ONLY(
+        "Apenas no Samsung DeX",
+        "Apenas DeX",
+        "Ativada automaticamente quando o modo Samsung DeX estiver ativo."
+    ),
+    ALWAYS(
+        "Sempre (DeX e Celular)",
+        "Sempre",
+        "Exibe a Mini Barra Flutuante durante gravações tanto no DeX quanto no celular."
+    )
+}
+
+enum class MiniBarCollapseBehavior(val title: String, val shortLabel: String, val description: String) {
+    COLLAPSE_TO_EDGE_TAB(
+        "Recolher em aba lateral",
+        "Aba lateral",
+        "Recolhe em uma pequena aba lateral semitransparente e discreta na borda da tela."
+    ),
+    HIDE_UNTIL_NOTIFICATION_TAP(
+        "Ocultar completamente até tocar na notificação",
+        "Ocultar total",
+        "Remove a barra da tela para gravação 100% limpa até tocar na notificação."
+    )
+}
+
+enum class NotificationControlStyle(val title: String, val shortLabel: String, val description: String) {
+    CUSTOM(
+        "Barra Customizada",
+        "Customizada",
+        "Layout escuro DeX com cronômetro em destaque + ações nativas de reserva."
+    ),
+    MEDIA_STYLE(
+        "Estilo Mídia Nativo",
+        "Mídia Nativo",
+        "Notificação compacta nativa do Android com botões de Pausar/Continuar e Parar."
+    )
+}
+
 data class RecordingSettings(
     val captureMode: ScreenCaptureMode = ScreenCaptureMode.FULL_SCREEN,
     val resolution: ResolutionOption = ResolutionOption.RES_1080P,
@@ -85,8 +129,15 @@ data class RecordingSettings(
     val floatingBallOpacity: Float = 0.85f,
     val enableFacecam: Boolean = false,
     val enableBrush: Boolean = false,
-    val useHevcCodec: Boolean = false // H.265 vs H.264
-)
+    val useHevcCodec: Boolean = false, // H.265 vs H.264
+    val dexMiniBarMode: DexMiniBarMode = DexMiniBarMode.DEX_ONLY,
+    val miniBarCollapseBehavior: MiniBarCollapseBehavior = MiniBarCollapseBehavior.COLLAPSE_TO_EDGE_TAB,
+    val notificationStyle: NotificationControlStyle = NotificationControlStyle.CUSTOM,
+    val notificationTapOpensMiniControl: Boolean = true
+) {
+    val enableDexMiniBar: Boolean
+        get() = dexMiniBarMode != DexMiniBarMode.OFF
+}
 
 /**
  * TAREFA 1: Integração com Android 14+ (API 34+ / UPSIDE_DOWN_CAKE) para criação do Intent do MediaProjectionManager.
@@ -128,6 +179,13 @@ object SettingsPreferences {
     private const val KEY_ENABLE_FACECAM = "enable_facecam"
     private const val KEY_ENABLE_BRUSH = "enable_brush"
     private const val KEY_USE_HEVC_CODEC = "use_hevc_codec"
+    private const val KEY_DEX_MINI_BAR_MODE = "dex_mini_bar_mode"
+    private const val KEY_MINI_BAR_COLLAPSE_BEHAVIOR = "mini_bar_collapse_behavior"
+    private const val KEY_NOTIFICATION_STYLE = "notification_style"
+    private const val KEY_NOTIFICATION_TAP_MINI_CONTROL = "notification_tap_opens_mini_control"
+    private const val KEY_MINI_BAR_POS_X = "dex_mini_bar_pos_x"
+    private const val KEY_MINI_BAR_POS_Y = "dex_mini_bar_pos_y"
+    private const val POS_UNSET = Int.MIN_VALUE
 
     fun save(context: Context, settings: RecordingSettings) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -146,6 +204,10 @@ object SettingsPreferences {
             putBoolean(KEY_ENABLE_FACECAM, settings.enableFacecam)
             putBoolean(KEY_ENABLE_BRUSH, settings.enableBrush)
             putBoolean(KEY_USE_HEVC_CODEC, settings.useHevcCodec)
+            putString(KEY_DEX_MINI_BAR_MODE, settings.dexMiniBarMode.name)
+            putString(KEY_MINI_BAR_COLLAPSE_BEHAVIOR, settings.miniBarCollapseBehavior.name)
+            putString(KEY_NOTIFICATION_STYLE, settings.notificationStyle.name)
+            putBoolean(KEY_NOTIFICATION_TAP_MINI_CONTROL, settings.notificationTapOpensMiniControl)
             apply()
         }
     }
@@ -159,12 +221,23 @@ object SettingsPreferences {
         val fpsName = prefs.getString(KEY_FPS, defaults.fps.name) ?: defaults.fps.name
         val bitrateName = prefs.getString(KEY_BITRATE, defaults.bitrate.name) ?: defaults.bitrate.name
         val audioModeName = prefs.getString(KEY_AUDIO_MODE, defaults.audioMode.name) ?: defaults.audioMode.name
+        val miniBarModeName = prefs.getString(KEY_DEX_MINI_BAR_MODE, defaults.dexMiniBarMode.name) ?: defaults.dexMiniBarMode.name
+        val collapseBehaviorName = prefs.getString(
+            KEY_MINI_BAR_COLLAPSE_BEHAVIOR,
+            defaults.miniBarCollapseBehavior.name
+        ) ?: defaults.miniBarCollapseBehavior.name
+        val notifStyleName = prefs.getString(KEY_NOTIFICATION_STYLE, defaults.notificationStyle.name) ?: defaults.notificationStyle.name
 
         val captureMode = runCatching { ScreenCaptureMode.valueOf(captureModeName) }.getOrDefault(defaults.captureMode)
         val resolution = runCatching { ResolutionOption.valueOf(resolutionName) }.getOrDefault(defaults.resolution)
         val fps = runCatching { FpsOption.valueOf(fpsName) }.getOrDefault(defaults.fps)
         val bitrate = runCatching { BitrateOption.valueOf(bitrateName) }.getOrDefault(defaults.bitrate)
         val audioMode = runCatching { AudioCaptureMode.valueOf(audioModeName) }.getOrDefault(defaults.audioMode)
+        val miniBarMode = runCatching { DexMiniBarMode.valueOf(miniBarModeName) }.getOrDefault(defaults.dexMiniBarMode)
+        val collapseBehavior = runCatching { MiniBarCollapseBehavior.valueOf(collapseBehaviorName) }
+            .getOrDefault(defaults.miniBarCollapseBehavior)
+        val notifStyle = runCatching { NotificationControlStyle.valueOf(notifStyleName) }
+            .getOrDefault(defaults.notificationStyle)
 
         return RecordingSettings(
             captureMode = captureMode,
@@ -183,8 +256,30 @@ object SettingsPreferences {
             floatingBallOpacity = prefs.getFloat(KEY_FLOATING_BALL_OPACITY, defaults.floatingBallOpacity),
             enableFacecam = prefs.getBoolean(KEY_ENABLE_FACECAM, defaults.enableFacecam),
             enableBrush = prefs.getBoolean(KEY_ENABLE_BRUSH, defaults.enableBrush),
-            useHevcCodec = prefs.getBoolean(KEY_USE_HEVC_CODEC, defaults.useHevcCodec)
+            useHevcCodec = prefs.getBoolean(KEY_USE_HEVC_CODEC, defaults.useHevcCodec),
+            dexMiniBarMode = miniBarMode,
+            miniBarCollapseBehavior = collapseBehavior,
+            notificationStyle = notifStyle,
+            notificationTapOpensMiniControl = prefs.getBoolean(
+                KEY_NOTIFICATION_TAP_MINI_CONTROL,
+                defaults.notificationTapOpensMiniControl
+            )
         )
+    }
+
+    fun saveDexMiniBarPosition(context: Context, x: Int, y: Int) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putInt(KEY_MINI_BAR_POS_X, x)
+            .putInt(KEY_MINI_BAR_POS_Y, y)
+            .apply()
+    }
+
+    fun loadDexMiniBarPosition(context: Context): Pair<Int, Int>? {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val x = prefs.getInt(KEY_MINI_BAR_POS_X, POS_UNSET)
+        val y = prefs.getInt(KEY_MINI_BAR_POS_Y, POS_UNSET)
+        return if (x != POS_UNSET && y != POS_UNSET) Pair(x, y) else null
     }
 }
 

@@ -336,6 +336,7 @@ fun DexRecorderApp(
                         )
                         4 -> SettingsScreen(
                             viewModel = viewModel,
+                            onRequestOverlayPermission = onRequestOverlayPermission,
                             modifier = Modifier.fillMaxSize()
                         )
                     }

@@ -1,6 +1,0 @@
-{
-  "summary":  "Plano arquitetural e de ciclo de vida para garantir que a barra de controle na notificação do Samsung DeX (One UI 7.0 / Android 15) funcione em todas as gravações seguidas (1ª, 2ª, 3ª...), eliminando o reuso do mesmo NOTIFICATION_ID após stopForeground, isolando cada sessão de gravação em uma NotificationEntry inédita e otimizando a quota de RemoteViews no SystemUI.",
-  "updatedAt":  "2026-10-21T00:49:22.861031329Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

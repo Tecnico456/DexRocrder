@@ -11,7 +11,10 @@ import com.example.DexRecorderApplication
 import com.example.editor.VideoEditorManager
 import com.example.model.AudioCaptureMode
 import com.example.model.BitrateOption
+import com.example.model.DexMiniBarMode
 import com.example.model.FpsOption
+import com.example.model.MiniBarCollapseBehavior
+import com.example.model.NotificationControlStyle
 import com.example.model.RecordedVideo
 import com.example.model.RecordingSettings
 import com.example.model.RecordingStatus
@@ -104,8 +107,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * TAREFA 4: Sincronização Imediata com o Switch do Aplicativo
-     * Quando o usuário desligar o Switch da "Bola Flutuante" dentro da tela principal do aplicativo,
-     * envia imediatamente o comando ACTION_HIDE_BALL e stopService para remover o overlay da tela no mesmo instante.
+     * Envia ACTION_HIDE_BALL para remover apenas a Bola Flutuante sem derrubar
+     * a Mini Barra DeX, Mini Menu da Notificação, Pincel ou Facecam se estiverem ativos.
      */
     fun toggleFloatingBall(context: Context, enabled: Boolean) {
         updateSettings { it.copy(showFloatingBall = enabled) }
@@ -122,7 +125,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 action = FloatingOverlayService.ACTION_HIDE_BALL
             }
             context.startService(hideIntent)
-            context.stopService(Intent(context, FloatingOverlayService::class.java))
+        }
+    }
+
+    fun setDexMiniBarMode(context: Context, mode: DexMiniBarMode) {
+        updateSettings { it.copy(dexMiniBarMode = mode) }
+        syncMiniBarIfRecording(context)
+    }
+
+    fun setMiniBarCollapseBehavior(context: Context, behavior: MiniBarCollapseBehavior) {
+        updateSettings { it.copy(miniBarCollapseBehavior = behavior) }
+        syncMiniBarIfRecording(context)
+    }
+
+    fun setNotificationStyle(context: Context, style: NotificationControlStyle) {
+        updateSettings { it.copy(notificationStyle = style) }
+        // Atualiza imediatamente a notificação ativa para o usuário ver a mudança na hora
+        ScreenRecordingService.showOrUpdateControlNotification(context, forceUpdate = true)
+    }
+
+    fun setNotificationTapOpensMiniControl(context: Context, enabled: Boolean) {
+        updateSettings { it.copy(notificationTapOpensMiniControl = enabled) }
+        // Reemite a notificação ativa para atualizar o PendingIntent do toque imediatamente
+        ScreenRecordingService.showOrUpdateControlNotification(context, forceUpdate = true)
+    }
+
+    private fun syncMiniBarIfRecording(context: Context) {
+        val status = ScreenRecordingService.recordingStatus.value
+        val activeRecording = ScreenRecordingService.isStartingOrRecording ||
+            status is RecordingStatus.Recording ||
+            status is RecordingStatus.Paused
+        if (activeRecording && Settings.canDrawOverlays(context)) {
+            val syncIntent = Intent(context, FloatingOverlayService::class.java).apply {
+                action = FloatingOverlayService.ACTION_SYNC_MINI_BAR
+            }
+            context.startService(syncIntent)
+        } else if (!activeRecording && FloatingOverlayService.isDexMiniBarVisible) {
+            val hideIntent = Intent(context, FloatingOverlayService::class.java).apply {
+                action = FloatingOverlayService.ACTION_HIDE_MINI_BAR
+            }
+            context.startService(hideIntent)
         }
     }
 

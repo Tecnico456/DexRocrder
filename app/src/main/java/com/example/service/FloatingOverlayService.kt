@@ -15,11 +15,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.example.MainActivity
+import com.example.model.DexMiniBarMode
 import com.example.model.RecordingStatus
 import com.example.model.SettingsPreferences
 import com.example.overlay.BrushOverlayView
+import com.example.overlay.DexMiniBarView
 import com.example.overlay.FacecamOverlayView
 import com.example.overlay.FloatingBallView
+import com.example.overlay.NotificationMiniControlView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -38,6 +41,10 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         const val ACTION_TOGGLE_FACECAM = "com.example.action.TOGGLE_FACECAM"
         const val ACTION_UPDATE_OPACITY = "com.example.action.UPDATE_OPACITY"
         const val ACTION_CLOSE_ALL = "com.example.action.CLOSE_ALL_OVERLAYS"
+        const val ACTION_SYNC_MINI_BAR = "com.example.action.SYNC_MINI_BAR"
+        const val ACTION_HIDE_MINI_BAR = "com.example.action.HIDE_MINI_BAR"
+        const val ACTION_SHOW_MINI_CONTROL = "com.example.action.SHOW_MINI_CONTROL"
+        const val ACTION_HIDE_MINI_CONTROL = "com.example.action.HIDE_MINI_CONTROL"
 
         const val EXTRA_OPACITY = "extra_opacity"
 
@@ -49,6 +56,12 @@ class FloatingOverlayService : Service(), LifecycleOwner {
 
         private val _facecamActiveFlow = MutableStateFlow(false)
         val facecamActiveFlow: StateFlow<Boolean> = _facecamActiveFlow.asStateFlow()
+
+        private val _dexMiniBarVisibleFlow = MutableStateFlow(false)
+        val dexMiniBarVisibleFlow: StateFlow<Boolean> = _dexMiniBarVisibleFlow.asStateFlow()
+
+        private val _miniControlVisibleFlow = MutableStateFlow(false)
+        val miniControlVisibleFlow: StateFlow<Boolean> = _miniControlVisibleFlow.asStateFlow()
 
         // Fluxo reativo para sincronizar o Switch da tela principal quando a bola é fechada pelo "X" ou arrastada
         private val _switchSyncFlow = MutableStateFlow<Boolean?>(null)
@@ -66,8 +79,24 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         var isFacecamActive = false
             private set
 
+        @Volatile
+        var isDexMiniBarVisible = false
+            private set
+
+        @Volatile
+        var isMiniControlVisible = false
+            private set
+
         fun notifySwitchStateChanged(enabled: Boolean) {
             _switchSyncFlow.value = enabled
+        }
+
+        fun shouldShowDexMiniBar(context: Context): Boolean {
+            return when (ScreenRecordingService.currentSettings.dexMiniBarMode) {
+                DexMiniBarMode.OFF -> false
+                DexMiniBarMode.DEX_ONLY -> ScreenRecordingService.isDeXMode(context)
+                DexMiniBarMode.ALWAYS -> true
+            }
         }
     }
 
@@ -78,8 +107,11 @@ class FloatingOverlayService : Service(), LifecycleOwner {
 
     private var windowManager: WindowManager? = null
     private var floatingBallView: FloatingBallView? = null
+    private var dexMiniBarView: DexMiniBarView? = null
+    private var miniControlView: NotificationMiniControlView? = null
     private var brushOverlayView: BrushOverlayView? = null
     private var facecamOverlayView: FacecamOverlayView? = null
+    private var dexMiniBarHiddenByUser: Boolean = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -90,10 +122,28 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
         lifecycleRegistry.currentState = Lifecycle.State.RESUMED
 
-        // Observa em tempo real os estados isRecording e isPaused do serviço de gravação
+        // Observa em tempo real os estados isRecording, isPaused e o tempo gravado do serviço de gravação
         overlayScope.launch {
             ScreenRecordingService.recordingStatus.collect { status ->
                 floatingBallView?.updateRecordingState(status)
+                dexMiniBarView?.updateRecordingState(status)
+                miniControlView?.updateRecordingState(status)
+
+                val isRecordingActive = status is RecordingStatus.Recording ||
+                    status is RecordingStatus.Paused
+                if (isRecordingActive) {
+                    if (shouldShowDexMiniBar(this@FloatingOverlayService) &&
+                        !dexMiniBarHiddenByUser &&
+                        Settings.canDrawOverlays(this@FloatingOverlayService)
+                    ) {
+                        showDexMiniBar()
+                    }
+                } else if (status is RecordingStatus.Idle || status is RecordingStatus.Error) {
+                    dexMiniBarHiddenByUser = false
+                    removeDexMiniBarOverlay()
+                    removeMiniControlOverlay()
+                    stopSelfIfIdle()
+                }
             }
         }
     }
@@ -102,9 +152,17 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         when (intent?.action) {
             ACTION_HIDE_BALL -> {
                 removeFloatingBallOverlay()
-                if (brushOverlayView == null && facecamOverlayView == null) {
-                    stopSelf()
-                }
+                stopSelfIfIdle()
+                return START_NOT_STICKY
+            }
+            ACTION_HIDE_MINI_BAR -> {
+                removeDexMiniBarOverlay()
+                stopSelfIfIdle()
+                return START_NOT_STICKY
+            }
+            ACTION_HIDE_MINI_CONTROL -> {
+                removeMiniControlOverlay()
+                stopSelfIfIdle()
                 return START_NOT_STICKY
             }
             ACTION_CLOSE_ALL -> {
@@ -114,17 +172,29 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         }
 
         if (!Settings.canDrawOverlays(this)) {
-            Log.w(tag, "Overlay permission not granted, requesting via MainActivity if triggered for tool")
-            if (intent?.action == ACTION_TOGGLE_BRUSH || intent?.action == ACTION_TOGGLE_FACECAM) {
-                val actIntent = Intent(this, MainActivity::class.java).apply {
-                    action = intent.action
-                    this.flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+            Log.w(tag, "Overlay permission not granted, falling back to MainActivity if user-triggered")
+            when (intent?.action) {
+                ACTION_TOGGLE_BRUSH, ACTION_TOGGLE_FACECAM -> {
+                    val actIntent = Intent(this, MainActivity::class.java).apply {
+                        action = intent.action
+                        this.flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    }
+                    startActivity(actIntent)
                 }
-                startActivity(actIntent)
+                ACTION_SHOW_MINI_CONTROL -> {
+                    val mainIntent = Intent(this, MainActivity::class.java).apply {
+                        this.flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    }
+                    startActivity(mainIntent)
+                }
             }
             removeFloatingBallOverlay()
+            removeDexMiniBarOverlay()
+            removeMiniControlOverlay()
             stopSelf()
             return START_NOT_STICKY
         }
@@ -137,10 +207,174 @@ class FloatingOverlayService : Service(), LifecycleOwner {
                 val opacity = intent.getFloatExtra(EXTRA_OPACITY, 0.85f)
                 floatingBallView?.setBallAlpha(opacity)
             }
+            ACTION_SYNC_MINI_BAR -> syncDexMiniBar()
+            ACTION_SHOW_MINI_CONTROL -> showNotificationMiniControl()
             else -> showFloatingBall()
         }
 
         return START_NOT_STICKY
+    }
+
+    private fun isRecordingActive(): Boolean {
+        val status = ScreenRecordingService.recordingStatus.value
+        return ScreenRecordingService.isStartingOrRecording ||
+            status is RecordingStatus.Recording ||
+            status is RecordingStatus.Paused
+    }
+
+    private fun syncDexMiniBar() {
+        val behavior = ScreenRecordingService.currentSettings.miniBarCollapseBehavior
+        if (isRecordingActive() && shouldShowDexMiniBar(this)) {
+            dexMiniBarHiddenByUser = false
+            showDexMiniBar()
+            dexMiniBarView?.updateCollapseBehavior(behavior)
+        } else {
+            removeDexMiniBarOverlay()
+            stopSelfIfIdle()
+        }
+    }
+
+    private fun showDexMiniBar() {
+        val wm = windowManager ?: return
+        val existing = dexMiniBarView
+        if (existing != null) {
+            existing.updateCollapseBehavior(ScreenRecordingService.currentSettings.miniBarCollapseBehavior)
+            existing.updateRecordingState(ScreenRecordingService.recordingStatus.value)
+            isDexMiniBarVisible = true
+            _dexMiniBarVisibleFlow.value = true
+            return
+        }
+
+        val miniBar = DexMiniBarView(
+            context = this,
+            windowManager = wm,
+            initialCollapseBehavior = ScreenRecordingService.currentSettings.miniBarCollapseBehavior,
+            onTogglePauseResume = { sendPauseOrResumeToRecordingService() },
+            onStopRecording = { sendStopToRecordingService() },
+            onHideUntilNotificationTap = {
+                dexMiniBarHiddenByUser = true
+                removeDexMiniBarOverlay()
+                stopSelfIfIdle()
+            }
+        )
+        miniBar.updateRecordingState(ScreenRecordingService.recordingStatus.value)
+        try {
+            wm.addView(miniBar, miniBar.layoutParams)
+            dexMiniBarView = miniBar
+            isDexMiniBarVisible = true
+            _dexMiniBarVisibleFlow.value = true
+            Log.d(tag, "DeX Mini Bar attached to window")
+        } catch (e: Exception) {
+            Log.e(tag, "Error adding DeX Mini Bar view", e)
+        }
+    }
+
+    private fun removeDexMiniBarOverlay() {
+        dexMiniBarView?.let { bar ->
+            try {
+                windowManager?.removeView(bar)
+            } catch (e: Exception) {
+                Log.w(tag, "Error removing DeX Mini Bar", e)
+            }
+        }
+        dexMiniBarView = null
+        isDexMiniBarVisible = false
+        _dexMiniBarVisibleFlow.value = false
+    }
+
+    private fun showNotificationMiniControl() {
+        val wm = windowManager ?: return
+        if (!isRecordingActive()) {
+            removeMiniControlOverlay()
+            stopSelfIfIdle()
+            return
+        }
+
+        // Se a Mini Barra DeX estava oculta pelo usuário ("Ocultar até tocar na notificação")
+        // ou recolhida em aba lateral, restaura-a de forma conveniente.
+        if (dexMiniBarHiddenByUser && shouldShowDexMiniBar(this)) {
+            dexMiniBarHiddenByUser = false
+            showDexMiniBar()
+        } else {
+            dexMiniBarView?.expandFromEdgeTab()
+        }
+
+        // Remove e readiciona se já existir para garantir que venha para a frente (z-order superior)
+        removeMiniControlOverlay()
+
+        val menu = NotificationMiniControlView(
+            context = this,
+            windowManager = wm,
+            onTogglePauseResume = { sendPauseOrResumeToRecordingService() },
+            onStopRecording = {
+                removeMiniControlOverlay()
+                sendStopToRecordingService()
+            },
+            onDismissMenu = {
+                removeMiniControlOverlay()
+                stopSelfIfIdle()
+            }
+        )
+        menu.updateRecordingState(ScreenRecordingService.recordingStatus.value)
+        try {
+            wm.addView(menu, menu.layoutParams)
+            miniControlView = menu
+            isMiniControlVisible = true
+            _miniControlVisibleFlow.value = true
+            Log.d(tag, "Notification Mini Control Menu attached to window")
+        } catch (e: Exception) {
+            Log.e(tag, "Error adding Notification Mini Control Menu", e)
+        }
+    }
+
+    private fun removeMiniControlOverlay() {
+        miniControlView?.let { menu ->
+            try {
+                windowManager?.removeView(menu)
+            } catch (e: Exception) {
+                Log.w(tag, "Error removing Notification Mini Control Menu", e)
+            }
+        }
+        miniControlView = null
+        isMiniControlVisible = false
+        _miniControlVisibleFlow.value = false
+    }
+
+    private fun sendPauseOrResumeToRecordingService() {
+        val status = ScreenRecordingService.recordingStatus.value
+        val action = if (status is RecordingStatus.Paused) {
+            ScreenRecordingService.ACTION_RESUME
+        } else {
+            ScreenRecordingService.ACTION_PAUSE
+        }
+        try {
+            startService(Intent(this, ScreenRecordingService::class.java).apply {
+                this.action = action
+            })
+        } catch (e: Exception) {
+            Log.e(tag, "Error sending $action to ScreenRecordingService", e)
+        }
+    }
+
+    private fun sendStopToRecordingService() {
+        try {
+            startService(Intent(this, ScreenRecordingService::class.java).apply {
+                action = ScreenRecordingService.ACTION_STOP
+            })
+        } catch (e: Exception) {
+            Log.e(tag, "Error sending ACTION_STOP to ScreenRecordingService", e)
+        }
+    }
+
+    private fun stopSelfIfIdle() {
+        if (floatingBallView == null &&
+            dexMiniBarView == null &&
+            miniControlView == null &&
+            brushOverlayView == null &&
+            facecamOverlayView == null
+        ) {
+            stopSelf()
+        }
     }
 
     private fun showFloatingBall() {
@@ -205,13 +439,13 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         ScreenRecordingService.currentSettings = updated
         SettingsPreferences.save(this, updated)
         _switchSyncFlow.value = false
-        if (brushOverlayView == null && facecamOverlayView == null) {
-            stopSelf()
-        }
+        stopSelfIfIdle()
     }
 
     private fun closeAllOverlaysAndStop() {
         removeFloatingBallOverlay()
+        removeDexMiniBarOverlay()
+        removeMiniControlOverlay()
         removeBrushOverlay()
         removeFacecamOverlay()
         val updated = ScreenRecordingService.currentSettings.copy(showFloatingBall = false)
@@ -250,6 +484,8 @@ class FloatingOverlayService : Service(), LifecycleOwner {
             status is RecordingStatus.Countdown
         if (!isRecording) {
             removeFloatingBallOverlay()
+            removeDexMiniBarOverlay()
+            removeMiniControlOverlay()
             removeBrushOverlay()
             removeFacecamOverlay()
             ScreenRecordingService.cancelControlNotification(this)
@@ -284,6 +520,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         }
         floatingBallView?.updateToolStates(isBrushActive, isFacecamActive)
         ScreenRecordingService.showOrUpdateControlNotification(this)
+        stopSelfIfIdle()
     }
 
     private fun removeBrushOverlay() {
@@ -301,7 +538,6 @@ class FloatingOverlayService : Service(), LifecycleOwner {
 
     private fun toggleFacecam() {
         if (facecamOverlayView == null) {
-            // Verifica se a permissão de câmera já foi concedida antes de abrir a Facecam
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
                 val actIntent = Intent(this, MainActivity::class.java).apply {
                     action = ACTION_TOGGLE_FACECAM
@@ -331,6 +567,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         }
         floatingBallView?.updateToolStates(isBrushActive, isFacecamActive)
         ScreenRecordingService.showOrUpdateControlNotification(this)
+        stopSelfIfIdle()
     }
 
     private fun removeFacecamOverlay() {
@@ -350,11 +587,10 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         super.onDestroy()
         overlayScope.cancel()
         removeFloatingBallOverlay()
+        removeDexMiniBarOverlay()
+        removeMiniControlOverlay()
         removeBrushOverlay()
         removeFacecamOverlay()
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
     }
 }
-
-
-

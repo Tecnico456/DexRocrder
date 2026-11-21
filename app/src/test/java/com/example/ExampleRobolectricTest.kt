@@ -311,12 +311,14 @@ class ExampleRobolectricTest {
         assertEquals(android.view.View.VISIBLE, readyFacecamBtn.visibility)
         assertEquals(android.view.View.VISIBLE, readyCloseBtn.visibility)
 
-        // 5. Verifica Notification completa (contentView, bigContentView, setShowWhen=false, setWhen=0L, IMPORTANCE_DEFAULT)
+        // 5. Verifica Notification completa no estilo CUSTOM (contentView, bigContentView, camada reserva nativa + VISIBILITY_PUBLIC)
         val notification = ScreenRecordingService.buildControlNotification(
             context = context,
             isRecording = true,
             isPaused = false,
-            chronometerBase = base7s
+            chronometerBase = base7s,
+            notificationStyle = com.example.model.NotificationControlStyle.CUSTOM,
+            tapOpensMiniControl = true
         )
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = nm.getNotificationChannel(ScreenRecordingService.CHANNEL_ID)
@@ -328,21 +330,156 @@ class ExampleRobolectricTest {
         assertNotNull(notification.bigContentView)
         assertEquals(0L, notification.`when`)
         assertEquals(false, notification.extras.getBoolean(android.app.Notification.EXTRA_SHOW_WHEN, true))
-        assertEquals(null, notification.extras.getCharSequence(android.app.Notification.EXTRA_TITLE))
-        assertEquals(null, notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT))
+        assertEquals("DexRecorder • Gravando", notification.extras.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString())
+        assertNotNull(notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT))
+        assertEquals(android.app.Notification.VISIBILITY_PUBLIC, notification.visibility)
+        assertEquals(2, notification.actions?.size)
+        assertEquals("Pausar", notification.actions?.get(0)?.title?.toString())
+        assertEquals("Parar", notification.actions?.get(1)?.title?.toString())
         assertEquals(true, (notification.flags and android.app.Notification.FLAG_ONGOING_EVENT) != 0)
         assertEquals(true, (notification.flags and android.app.Notification.FLAG_ONLY_ALERT_ONCE) != 0)
 
-        // 6. Verifica que múltiplas gravações seguidas alocam IDs de notificação exclusivos e inéditos
+        // 6. Verifica Notification completa no estilo MEDIA_STYLE (MediaStyle compacto, cronômetro nativo, ações Pausar/Continuar + Parar)
+        val mediaNotification = ScreenRecordingService.buildControlNotification(
+            context = context,
+            isRecording = true,
+            isPaused = false,
+            chronometerBase = base7s,
+            notificationStyle = com.example.model.NotificationControlStyle.MEDIA_STYLE,
+            tapOpensMiniControl = true
+        )
+        assertEquals("DexRecorder • Gravando", mediaNotification.extras.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString())
+        assertEquals(true, mediaNotification.extras.getBoolean(android.app.Notification.EXTRA_SHOW_CHRONOMETER, false))
+        assertEquals(true, mediaNotification.extras.getBoolean(android.app.Notification.EXTRA_SHOW_WHEN, false))
+        val compactActions = mediaNotification.extras.getIntArray(android.app.Notification.EXTRA_COMPACT_ACTIONS)
+        assertNotNull(compactActions)
+        assertEquals(2, compactActions?.size)
+        assertEquals(0, compactActions?.get(0))
+        assertEquals(1, compactActions?.get(1))
+        assertEquals(2, mediaNotification.actions?.size)
+        assertEquals("Pausar", mediaNotification.actions?.get(0)?.title?.toString())
+        assertEquals("Parar", mediaNotification.actions?.get(1)?.title?.toString())
+
+        val pausedMediaNotification = ScreenRecordingService.buildControlNotification(
+            context = context,
+            isRecording = true,
+            isPaused = true,
+            elapsedText = "00:12",
+            chronometerBase = base7s,
+            notificationStyle = com.example.model.NotificationControlStyle.MEDIA_STYLE,
+            tapOpensMiniControl = false
+        )
+        assertEquals("DexRecorder • Pausado", pausedMediaNotification.extras.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString())
+        assertEquals("Continuar", pausedMediaNotification.actions?.get(0)?.title?.toString())
+        assertEquals("Parar", pausedMediaNotification.actions?.get(1)?.title?.toString())
+
+        // 7. Verifica que múltiplas gravações seguidas alocam IDs de notificação exclusivos e inéditos
         // (separados de NOTIFICATION_ID = 1001) para impedir Cooldown / CustomView Stripping na One UI 7.0
-        val sessionId1 = ScreenRecordingService.allocateNextRecordingNotificationId()
-        val sessionId2 = ScreenRecordingService.allocateNextRecordingNotificationId()
-        val sessionId3 = ScreenRecordingService.allocateNextRecordingNotificationId()
+        val sessionId1 = ScreenRecordingService.nextNotificationId()
+        val sessionId2 = ScreenRecordingService.nextNotificationId()
+        val sessionId3 = ScreenRecordingService.nextNotificationId()
         assertEquals(true, sessionId1 > ScreenRecordingService.NOTIFICATION_ID)
         assertEquals(sessionId1 + 1, sessionId2)
         assertEquals(sessionId2 + 1, sessionId3)
         ScreenRecordingService.cancelControlNotification(context)
         assertEquals(ScreenRecordingService.NOTIFICATION_ID, ScreenRecordingService.activeNotificationId)
+    }
+
+    @Test
+    fun `verify new DeX Mini Bar settings persistence, DexMiniBarView collapse modes, and NotificationMiniControlView`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+
+        // 1. Verifica valores padrão e persistência no SharedPreferences
+        val defaults = com.example.model.RecordingSettings()
+        assertEquals(com.example.model.DexMiniBarMode.DEX_ONLY, defaults.dexMiniBarMode)
+        assertEquals(com.example.model.MiniBarCollapseBehavior.COLLAPSE_TO_EDGE_TAB, defaults.miniBarCollapseBehavior)
+        assertEquals(com.example.model.NotificationControlStyle.CUSTOM, defaults.notificationStyle)
+        assertEquals(true, defaults.notificationTapOpensMiniControl)
+
+        val custom = defaults.copy(
+            dexMiniBarMode = com.example.model.DexMiniBarMode.ALWAYS,
+            miniBarCollapseBehavior = com.example.model.MiniBarCollapseBehavior.HIDE_UNTIL_NOTIFICATION_TAP,
+            notificationStyle = com.example.model.NotificationControlStyle.MEDIA_STYLE,
+            notificationTapOpensMiniControl = false
+        )
+        com.example.model.SettingsPreferences.save(context, custom)
+        val reloaded = com.example.model.SettingsPreferences.load(context)
+        assertEquals(com.example.model.DexMiniBarMode.ALWAYS, reloaded.dexMiniBarMode)
+        assertEquals(com.example.model.MiniBarCollapseBehavior.HIDE_UNTIL_NOTIFICATION_TAP, reloaded.miniBarCollapseBehavior)
+        assertEquals(com.example.model.NotificationControlStyle.MEDIA_STYLE, reloaded.notificationStyle)
+        assertEquals(false, reloaded.notificationTapOpensMiniControl)
+
+        // Persistência de posição (x, y) da Mini Barra DeX
+        com.example.model.SettingsPreferences.saveDexMiniBarPosition(context, 120, 80)
+        val savedPos = com.example.model.SettingsPreferences.loadDexMiniBarPosition(context)
+        assertEquals(Pair(120, 80), savedPos)
+
+        // 2. Verifica DexMiniBarView: estado, pausa/continuar, recolher em aba lateral e ocultar total
+        var pauseResumeClicked = 0
+        var stopClicked = 0
+        var hideTotalClicked = 0
+        val miniBar = com.example.overlay.DexMiniBarView(
+            context = context,
+            windowManager = wm,
+            initialCollapseBehavior = com.example.model.MiniBarCollapseBehavior.COLLAPSE_TO_EDGE_TAB,
+            onTogglePauseResume = { pauseResumeClicked++ },
+            onStopRecording = { stopClicked++ },
+            onHideUntilNotificationTap = { hideTotalClicked++ }
+        )
+
+        miniBar.updateRecordingState(com.example.model.RecordingStatus.Recording(65_000L))
+        assertEquals("01:05", miniBar.timerText.text.toString())
+        assertEquals(false, miniBar.isPausedState)
+        assertEquals("Pausar Gravação", miniBar.btnPauseResume.contentDescription)
+
+        miniBar.updateRecordingState(com.example.model.RecordingStatus.Paused(65_000L))
+        assertEquals(true, miniBar.isPausedState)
+        assertEquals("Continuar Gravação", miniBar.btnPauseResume.contentDescription)
+
+        miniBar.btnPauseResume.performClick()
+        miniBar.btnStop.performClick()
+        assertEquals(1, pauseResumeClicked)
+        assertEquals(1, stopClicked)
+
+        // Modo Aba lateral: recolhe e reexpande
+        miniBar.btnCollapseOrHide.performClick()
+        assertEquals(true, miniBar.isCollapsedToEdgeTab)
+        assertEquals(android.view.View.GONE, miniBar.pillContainer.visibility)
+        assertEquals(android.view.View.VISIBLE, miniBar.edgeTabContainer.visibility)
+        miniBar.expandFromEdgeTab()
+        assertEquals(false, miniBar.isCollapsedToEdgeTab)
+        assertEquals(android.view.View.VISIBLE, miniBar.pillContainer.visibility)
+
+        // Modo Ocultar completamente até tocar na notificação
+        miniBar.updateCollapseBehavior(com.example.model.MiniBarCollapseBehavior.HIDE_UNTIL_NOTIFICATION_TAP)
+        miniBar.btnCollapseOrHide.performClick()
+        assertEquals(1, hideTotalClicked)
+
+        // 3. Verifica NotificationMiniControlView
+        var miniPauseClicked = 0
+        var miniStopClicked = 0
+        var miniDismissClicked = 0
+        val miniControl = com.example.overlay.NotificationMiniControlView(
+            context = context,
+            windowManager = wm,
+            onTogglePauseResume = { miniPauseClicked++ },
+            onStopRecording = { miniStopClicked++ },
+            onDismissMenu = { miniDismissClicked++ }
+        )
+        miniControl.updateRecordingState(com.example.model.RecordingStatus.Recording(12_000L))
+        assertEquals("00:12", miniControl.timerText.text.toString())
+        assertEquals("Pausar", miniControl.pauseResumeLabel.text.toString())
+
+        miniControl.updateRecordingState(com.example.model.RecordingStatus.Paused(12_000L))
+        assertEquals("Continuar", miniControl.pauseResumeLabel.text.toString())
+
+        miniControl.btnPauseResume.performClick()
+        miniControl.btnStop.performClick()
+        miniControl.btnCloseMenu.performClick()
+        assertEquals(1, miniPauseClicked)
+        assertEquals(1, miniStopClicked)
+        assertEquals(1, miniDismissClicked)
     }
 }
 
