@@ -22,18 +22,14 @@ import com.example.model.RecordingStatus
 import com.example.model.SettingsPreferences
 import com.example.service.ScreenRecordingService
 import kotlin.math.hypot
-import kotlin.math.roundToInt
 
 /**
  * Mini Barra Flutuante compacta (Modo DeX e Celular):
  * - Pílula horizontal escura, discreta e arrastável para qualquer canto da tela.
- * - Redimensionamento proporcional real em dp/sp (sem cortar bordas no WindowManager)
- *   e opacidade configurável (25% a 100%, padrão 90%).
+ * - Redimensionamento proporcional real em dp/sp (80% a 300%) usando a densidade real do display alvo
+ *   e limitador de segurança de 94% da largura da tela para evitar qualquer corte de botões.
+ * - Opacidade configurável (25% a 100%, padrão 90%) e Aba Lateral Recolhida proporcional.
  * - Salva automaticamente a última posição arrastada no SharedPreferences.
- * - Exibe indicador colorido (vermelho gravando / amarelo pausado), cronômetro tabular em tempo real,
- *   botão dinâmico Pausar (||) ⇄ Continuar (▶), botão Parar (■) e botão Recolher/Ocultar.
- * - Suporta recolhimento em pequena aba lateral semitransparente proporcional (reabrível com 1 toque)
- *   ou ocultação completa até o usuário tocar na notificação.
  */
 @SuppressLint("ViewConstructor")
 class DexMiniBarView(
@@ -44,7 +40,8 @@ class DexMiniBarView(
     private val onStopRecording: () -> Unit,
     private val onHideUntilNotificationTap: () -> Unit,
     initialSizePercent: Int = SettingsPreferences.DEFAULT_MINI_BAR_SIZE_PERCENT,
-    initialOpacityPercent: Int = SettingsPreferences.DEFAULT_MINI_BAR_OPACITY_PERCENT
+    initialOpacityPercent: Int = SettingsPreferences.DEFAULT_MINI_BAR_OPACITY_PERCENT,
+    private val metricsProvider: (() -> OverlayDisplaySnapshot)? = null
 ) : FrameLayout(context) {
 
     var collapseBehavior: MiniBarCollapseBehavior = initialCollapseBehavior
@@ -56,8 +53,14 @@ class DexMiniBarView(
     var currentOpacityPercent: Int = SettingsPreferences.sanitizeMiniBarOpacityPercent(initialOpacityPercent)
         private set
 
-    private val pillScale: Float
+    private val requestedPillScale: Float
         get() = currentSizePercent / 100f
+
+    /**
+     * Escala efetiva aplicada à Pílula após respeitar o teto de segurança de 94% da largura do display.
+     */
+    var effectivePillScale: Float = requestedPillScale
+        private set
 
     var isCollapsedToEdgeTab: Boolean = false
         private set
@@ -68,6 +71,10 @@ class DexMiniBarView(
     private var savedExpandedX: Int = 0
     private var savedExpandedY: Int = 0
     private var collapsedOnRightEdge: Boolean = false
+
+    private fun currentMetrics(): OverlayDisplaySnapshot {
+        return metricsProvider?.invoke() ?: OverlayDisplayMetrics.readMetrics(context, windowManager)
+    }
 
     val layoutParams: WindowManager.LayoutParams = WindowManager.LayoutParams(
         WindowManager.LayoutParams.WRAP_CONTENT,
@@ -113,12 +120,24 @@ class DexMiniBarView(
         updateRecordingState(ScreenRecordingService.recordingStatus.value)
     }
 
+    private fun computeEffectivePillScale(metrics: OverlayDisplaySnapshot, requested: Float): Float {
+        // Largura base estimada da Pílula em 100% (~212dp cobrindo padding, ponto, cronômetro, 3 botões e borda)
+        val estimatedNaturalWidthPx = metrics.scaledDp(212, requested)
+        val maxAllowedPx = metrics.maxAllowedWidthPx
+        return if (estimatedNaturalWidthPx > maxAllowedPx) {
+            (requested * (maxAllowedPx.toFloat() / estimatedNaturalWidthPx.toFloat())).coerceAtLeast(0.55f)
+        } else {
+            requested
+        }
+    }
+
     private fun computeInitialPosition(): Pair<Int, Int> {
-        val metrics = context.resources.displayMetrics
-        val screenW = metrics.widthPixels.coerceAtLeast(dpToPx(320))
-        val screenH = metrics.heightPixels.coerceAtLeast(dpToPx(320))
-        val estimatedBarWidth = scaledDp(220, pillScale)
-        val estimatedBarHeight = scaledDp(46, pillScale)
+        val metrics = currentMetrics()
+        val effScale = computeEffectivePillScale(metrics, requestedPillScale)
+        val screenW = metrics.widthPixels
+        val screenH = metrics.heightPixels
+        val estimatedBarWidth = metrics.scaledDp(212, effScale).coerceAtMost(metrics.maxAllowedWidthPx)
+        val estimatedBarHeight = metrics.scaledDp(46, effScale)
 
         val saved = SettingsPreferences.loadDexMiniBarPosition(context)
         return if (saved != null) {
@@ -126,8 +145,8 @@ class DexMiniBarView(
             val clampedY = saved.second.coerceIn(0, (screenH - estimatedBarHeight).coerceAtLeast(0))
             Pair(clampedX, clampedY)
         } else {
-            val centerX = ((screenW - estimatedBarWidth) / 2).coerceAtLeast(dpToPx(12))
-            val topY = dpToPx(24)
+            val centerX = ((screenW - estimatedBarWidth) / 2).coerceAtLeast(metrics.dpToPx(8))
+            val topY = metrics.dpToPx(24)
             Pair(centerX, topY)
         }
     }
@@ -135,7 +154,7 @@ class DexMiniBarView(
     private fun setupExpandedPill() {
         pillContainer.orientation = LinearLayout.HORIZONTAL
         pillContainer.gravity = Gravity.CENTER_VERTICAL
-        pillContainer.elevation = dpToPx(8).toFloat()
+        pillContainer.elevation = currentMetrics().dpToPx(8).toFloat()
 
         statusDot.background = makeCircleDrawable(0xFFFF3B30.toInt())
         pillContainer.addView(statusDot)
@@ -199,48 +218,53 @@ class DexMiniBarView(
     }
 
     /**
-     * TAREFA 3: Aplica escala proporcional real em dp/sp e opacidade na Pílula e na Aba Lateral Recolhida,
-     * mantendo WRAP_CONTENT e fazendo clamp seguro de (x, y) dentro das bordas da tela.
+     * TAREFA 2 & 3: Aplica escala proporcional real em dp/sp com base nas DisplayMetrics reais
+     * do display alvo e teto de segurança de 94% da largura da tela, mantendo WRAP_CONTENT
+     * e fazendo clamp seguro de (x, y) dentro das bordas.
      */
     fun applyStyle(sizePercent: Int, opacityPercent: Int) {
         currentSizePercent = SettingsPreferences.sanitizeSizePercent(sizePercent)
         currentOpacityPercent = SettingsPreferences.sanitizeMiniBarOpacityPercent(opacityPercent)
 
-        val s = pillScale
+        val metrics = currentMetrics()
+        val s = computeEffectivePillScale(metrics, requestedPillScale)
+        effectivePillScale = s
+
         val userAlpha = currentOpacityPercent / 100f
         val edgeAlpha = SettingsPreferences.computeEdgeTabAlpha(currentOpacityPercent)
 
         // 1. Pílula expandida
         pillContainer.alpha = userAlpha
+        pillContainer.elevation = metrics.dpToPx(8).toFloat()
         pillContainer.background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = scaledDp(24, s).toFloat()
+            cornerRadius = metrics.scaledDp(24, s).toFloat()
             setColor(0xEB141820.toInt())
-            setStroke(scaledDp(1, s).coerceAtLeast(1), 0x44FFFFFF)
+            setStroke(metrics.scaledDp(1, s).coerceAtLeast(1), 0x44FFFFFF)
         }
         pillContainer.setPadding(
-            scaledDp(12, s),
-            scaledDp(6, s),
-            scaledDp(8, s),
-            scaledDp(6, s)
+            metrics.scaledDp(12, s),
+            metrics.scaledDp(6, s),
+            metrics.scaledDp(8, s),
+            metrics.scaledDp(6, s)
         )
 
-        val dotSize = scaledDp(10, s)
+        val dotSize = metrics.scaledDp(10, s)
         statusDot.layoutParams = LinearLayout.LayoutParams(dotSize, dotSize).apply {
-            marginEnd = scaledDp(8, s)
+            marginEnd = metrics.scaledDp(8, s)
         }
 
-        timerText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * s)
+        timerText.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.scaledSpPx(13f, s))
         timerText.layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply {
-            marginEnd = scaledDp(10, s)
+            marginEnd = metrics.scaledDp(10, s)
         }
 
-        val actionSize = scaledDp(32, s)
-        val actionPad = scaledDp(7, s)
-        val actionGap = scaledDp(6, s)
+        val actionSize = metrics.scaledDp(32, s)
+        val actionPad = metrics.scaledDp(7, s)
+        val actionGap = metrics.scaledDp(6, s)
         btnPauseResume.background = makeCircleDrawable(0xFF283040.toInt())
         btnPauseResume.layoutParams = LinearLayout.LayoutParams(actionSize, actionSize).apply {
             marginEnd = actionGap
@@ -253,34 +277,46 @@ class DexMiniBarView(
         }
         btnStop.setPadding(actionPad, actionPad, actionPad, actionPad)
 
-        val collapseSize = scaledDp(28, s)
-        val collapsePad = scaledDp(7, s)
+        val collapseSize = metrics.scaledDp(28, s)
+        val collapsePad = metrics.scaledDp(7, s)
         btnCollapseOrHide.background = makeCircleDrawable(0x24FFFFFF)
         btnCollapseOrHide.layoutParams = LinearLayout.LayoutParams(collapseSize, collapseSize)
         btnCollapseOrHide.setPadding(collapsePad, collapsePad, collapsePad, collapsePad)
 
-        // 2. Aba Lateral Recolhida proporcional e discreta
+        // 2. Aba Lateral Recolhida proporcional e discreta (usa a escala desejada limitada a 35% da largura da tela)
+        val rawTabWidthPx = metrics.scaledDp(28, requestedPillScale)
+        val maxTabWidthPx = (metrics.widthPixels * 0.35f).toInt().coerceAtLeast(metrics.dpToPx(24))
+        val tabScale = if (rawTabWidthPx > maxTabWidthPx) {
+            (requestedPillScale * (maxTabWidthPx.toFloat() / rawTabWidthPx.toFloat())).coerceAtLeast(0.8f)
+        } else {
+            requestedPillScale
+        }
+
         edgeTabContainer.alpha = edgeAlpha
         edgeTabContainer.setPadding(
-            scaledDp(6, s),
-            scaledDp(8, s),
-            scaledDp(6, s),
-            scaledDp(8, s)
+            metrics.scaledDp(6, tabScale),
+            metrics.scaledDp(8, tabScale),
+            metrics.scaledDp(6, tabScale),
+            metrics.scaledDp(8, tabScale)
         )
-        val edgeDotSize = scaledDp(7, s)
+        val edgeDotSize = metrics.scaledDp(7, tabScale)
         edgeStatusDot.layoutParams = LinearLayout.LayoutParams(edgeDotSize, edgeDotSize).apply {
-            bottomMargin = scaledDp(4, s)
+            bottomMargin = metrics.scaledDp(4, tabScale)
         }
-        edgeChevronText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f * s)
-        applyEdgeTabBackground(onRightEdge = collapsedOnRightEdge)
+        edgeChevronText.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.scaledSpPx(14f, tabScale))
+        applyEdgeTabBackground(onRightEdge = collapsedOnRightEdge, tabScale = tabScale, metrics = metrics)
 
         requestLayout()
         clampPositionToScreen()
         safeUpdateWindowLayout()
     }
 
-    private fun applyEdgeTabBackground(onRightEdge: Boolean) {
-        val r = scaledDp(14, pillScale).toFloat()
+    private fun applyEdgeTabBackground(
+        onRightEdge: Boolean,
+        tabScale: Float = effectivePillScale,
+        metrics: OverlayDisplaySnapshot = currentMetrics()
+    ) {
+        val r = metrics.scaledDp(14, tabScale).toFloat()
         val radii = if (onRightEdge) {
             floatArrayOf(r, r, 0f, 0f, 0f, 0f, r, r)
         } else {
@@ -290,7 +326,7 @@ class DexMiniBarView(
             shape = GradientDrawable.RECTANGLE
             cornerRadii = radii
             setColor(0xD9141820.toInt())
-            setStroke(scaledDp(1, pillScale).coerceAtLeast(1), 0x44FFFFFF)
+            setStroke(metrics.scaledDp(1, tabScale).coerceAtLeast(1), 0x44FFFFFF)
         }
         edgeChevronText.text = if (onRightEdge) "‹" else "›"
     }
@@ -323,20 +359,25 @@ class DexMiniBarView(
 
     fun collapseToEdgeTab() {
         if (isCollapsedToEdgeTab) return
-        val screenW = context.resources.displayMetrics.widthPixels.coerceAtLeast(dpToPx(320))
+        val metrics = currentMetrics()
+        val screenW = metrics.widthPixels
         savedExpandedX = layoutParams.x
         savedExpandedY = layoutParams.y
 
-        val barWidth = if (pillContainer.width > 0) pillContainer.width else scaledDp(220, pillScale)
+        val barWidth = if (pillContainer.width > 0) {
+            pillContainer.width
+        } else {
+            metrics.scaledDp(212, effectivePillScale).coerceAtMost(metrics.maxAllowedWidthPx)
+        }
         val centerX = savedExpandedX + (barWidth / 2)
         collapsedOnRightEdge = centerX >= (screenW / 2)
 
-        applyEdgeTabBackground(onRightEdge = collapsedOnRightEdge)
+        applyEdgeTabBackground(onRightEdge = collapsedOnRightEdge, tabScale = effectivePillScale, metrics = metrics)
         pillContainer.visibility = View.GONE
         edgeTabContainer.visibility = View.VISIBLE
         isCollapsedToEdgeTab = true
 
-        val tabWidth = scaledDp(26, pillScale)
+        val tabWidth = metrics.scaledDp(26, effectivePillScale)
         layoutParams.x = if (collapsedOnRightEdge) (screenW - tabWidth).coerceAtLeast(0) else 0
         layoutParams.y = savedExpandedY
         clampPositionToScreen()
@@ -356,18 +397,26 @@ class DexMiniBarView(
     }
 
     fun clampPositionToScreen() {
-        val metrics = context.resources.displayMetrics
-        val screenW = metrics.widthPixels.coerceAtLeast(dpToPx(320))
-        val screenH = metrics.heightPixels.coerceAtLeast(dpToPx(320))
+        val metrics = currentMetrics()
+        val screenW = metrics.widthPixels
+        val screenH = metrics.heightPixels
 
         if (isCollapsedToEdgeTab) {
-            val tabWidth = scaledDp(26, pillScale)
-            val tabHeight = scaledDp(48, pillScale)
+            val tabWidth = if (edgeTabContainer.width > 0) edgeTabContainer.width else metrics.scaledDp(26, effectivePillScale)
+            val tabHeight = if (edgeTabContainer.height > 0) edgeTabContainer.height else metrics.scaledDp(48, effectivePillScale)
             layoutParams.x = if (collapsedOnRightEdge) (screenW - tabWidth).coerceAtLeast(0) else 0
             layoutParams.y = layoutParams.y.coerceIn(0, (screenH - tabHeight).coerceAtLeast(0))
         } else {
-            val estWidth = if (pillContainer.width > 0) pillContainer.width else scaledDp(220, pillScale)
-            val estHeight = if (pillContainer.height > 0) pillContainer.height else scaledDp(46, pillScale)
+            val estWidth = if (pillContainer.width > 0) {
+                pillContainer.width.coerceAtMost(screenW)
+            } else {
+                metrics.scaledDp(212, effectivePillScale).coerceAtMost(metrics.maxAllowedWidthPx)
+            }
+            val estHeight = if (pillContainer.height > 0) {
+                pillContainer.height.coerceAtMost(screenH)
+            } else {
+                metrics.scaledDp(46, effectivePillScale)
+            }
             layoutParams.x = layoutParams.x.coerceIn(0, (screenW - estWidth).coerceAtLeast(0))
             layoutParams.y = layoutParams.y.coerceIn(0, (screenH - estHeight).coerceAtLeast(0))
             savedExpandedX = layoutParams.x
@@ -402,8 +451,9 @@ class DexMiniBarView(
 
     @SuppressLint("ClickableViewAccessibility")
     private fun setupDragTouch(targetView: View, savePositionOnUp: Boolean) {
-        val touchSlop = dpToPx(6)
         targetView.setOnTouchListener { _, event ->
+            val metrics = currentMetrics()
+            val touchSlop = metrics.dpToPx(6)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = layoutParams.x
@@ -420,11 +470,10 @@ class DexMiniBarView(
                         isDragging = true
                     }
                     if (isDragging) {
-                        val metrics = context.resources.displayMetrics
                         val maxW = (metrics.widthPixels - width).coerceAtLeast(0)
                         val maxH = (metrics.heightPixels - height).coerceAtLeast(0)
                         layoutParams.x = (initialX + dx.toInt()).coerceIn(0, maxW)
-                        layoutParams.y = (initialY + dy.toInt()).coerceIn(0, maxH)
+                        layoutParams.y = (initialY + dy.toInt()).coerceAtLeast(0).coerceAtMost(maxH)
                         savedExpandedX = layoutParams.x
                         savedExpandedY = layoutParams.y
                         safeUpdateWindowLayout()
@@ -445,8 +494,9 @@ class DexMiniBarView(
 
     @SuppressLint("ClickableViewAccessibility")
     private fun setupEdgeTabTouch() {
-        val touchSlop = dpToPx(6)
         edgeTabContainer.setOnTouchListener { _, event ->
+            val metrics = currentMetrics()
+            val touchSlop = metrics.dpToPx(6)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     initialY = layoutParams.y
@@ -462,7 +512,6 @@ class DexMiniBarView(
                         isDragging = true
                     }
                     if (isDragging) {
-                        val metrics = context.resources.displayMetrics
                         val maxH = (metrics.heightPixels - height).coerceAtLeast(0)
                         layoutParams.y = (initialY + dy.toInt()).coerceIn(0, maxH)
                         savedExpandedY = layoutParams.y
@@ -492,13 +541,5 @@ class DexMiniBarView(
                 windowManager.updateViewLayout(this, layoutParams)
             } catch (_: Exception) {}
         }
-    }
-
-    private fun dpToPx(dp: Int): Int {
-        return (dp * context.resources.displayMetrics.density).toInt()
-    }
-
-    private fun scaledDp(baseDp: Int, scale: Float): Int {
-        return (baseDp * scale * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
     }
 }

@@ -5,6 +5,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.IBinder
 import android.provider.Settings
@@ -23,6 +24,7 @@ import com.example.overlay.DexMiniBarView
 import com.example.overlay.FacecamOverlayView
 import com.example.overlay.FloatingBallView
 import com.example.overlay.NotificationMiniControlView
+import com.example.overlay.OverlayDisplayMetrics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -111,6 +113,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
     private val overlayScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var windowManager: WindowManager? = null
+    private var overlayContext: Context? = null
     private var floatingBallView: FloatingBallView? = null
     private var dexMiniBarView: DexMiniBarView? = null
     private var miniControlView: NotificationMiniControlView? = null
@@ -120,10 +123,19 @@ class FloatingOverlayService : Service(), LifecycleOwner {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun refreshOverlayDisplayContext(): Pair<Context, WindowManager?> {
+        val baseWm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+        val displayCtx = OverlayDisplayMetrics.resolveOverlayDisplayContext(this, baseWm)
+        val displayWm = (displayCtx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager) ?: baseWm
+        overlayContext = displayCtx
+        windowManager = displayWm
+        return Pair(displayCtx, displayWm)
+    }
+
     override fun onCreate() {
         super.onCreate()
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        refreshOverlayDisplayContext()
         // Carrega preferências persistidas com limites seguros (coerceIn) logo na inicialização do serviço
         ScreenRecordingService.currentSettings = SettingsPreferences.load(this)
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
@@ -267,7 +279,8 @@ class FloatingOverlayService : Service(), LifecycleOwner {
     }
 
     private fun showDexMiniBar() {
-        val wm = windowManager ?: return
+        val (displayCtx, wm) = refreshOverlayDisplayContext()
+        if (wm == null) return
         val settings = ScreenRecordingService.currentSettings
         val existing = dexMiniBarView
         if (existing != null) {
@@ -280,7 +293,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
         }
 
         val miniBar = DexMiniBarView(
-            context = this,
+            context = displayCtx,
             windowManager = wm,
             initialCollapseBehavior = settings.miniBarCollapseBehavior,
             onTogglePauseResume = { sendPauseOrResumeToRecordingService() },
@@ -319,7 +332,8 @@ class FloatingOverlayService : Service(), LifecycleOwner {
     }
 
     private fun showNotificationMiniControl() {
-        val wm = windowManager ?: return
+        val (displayCtx, wm) = refreshOverlayDisplayContext()
+        if (wm == null) return
         if (!isRecordingActive()) {
             removeMiniControlOverlay()
             stopSelfIfIdle()
@@ -340,7 +354,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
 
         val settings = ScreenRecordingService.currentSettings
         val menu = NotificationMiniControlView(
-            context = this,
+            context = displayCtx,
             windowManager = wm,
             onTogglePauseResume = { sendPauseOrResumeToRecordingService() },
             onStopRecording = {
@@ -417,11 +431,12 @@ class FloatingOverlayService : Service(), LifecycleOwner {
     }
 
     private fun showFloatingBall() {
+        val (displayCtx, wm) = refreshOverlayDisplayContext()
         val settings = ScreenRecordingService.currentSettings
-        if (floatingBallView == null && windowManager != null) {
+        if (floatingBallView == null && wm != null) {
             val ball = FloatingBallView(
-                context = this,
-                windowManager = windowManager!!,
+                context = displayCtx,
+                windowManager = wm,
                 onStartRecording = { startRecordingFromOverlay() },
                 onToggleBrush = { toggleBrush() },
                 onToggleFacecam = { toggleFacecam() },
@@ -432,7 +447,7 @@ class FloatingOverlayService : Service(), LifecycleOwner {
             ball.updateRecordingState(ScreenRecordingService.recordingStatus.value)
             ball.updateToolStates(isBrushActive, isFacecamActive)
             try {
-                windowManager?.addView(ball, ball.layoutParams)
+                wm.addView(ball, ball.layoutParams)
                 floatingBallView = ball
                 isFloatingBallVisible = true
                 _floatingBallVisibleFlow.value = true
@@ -448,6 +463,14 @@ class FloatingOverlayService : Service(), LifecycleOwner {
             isFloatingBallVisible = floatingBallView != null
             _floatingBallVisibleFlow.value = isFloatingBallVisible
         }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val settings = ScreenRecordingService.currentSettings
+        floatingBallView?.applySizePercent(settings.floatingBubbleSizePercent)
+        dexMiniBarView?.applyStyle(settings.dexMiniBarSizePercent, settings.dexMiniBarOpacityPercent)
+        miniControlView?.applyStyle(settings.dexMiniBarSizePercent, settings.dexMiniBarOpacityPercent)
     }
 
     /**

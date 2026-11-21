@@ -487,15 +487,16 @@ class ExampleRobolectricTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
 
-        // 1. Defaults e clamping de segurança (coerceIn + passos de 5%)
+        // 1. Defaults e clamping de segurança (80..300 em passos de 10%; opacidade 25..100 em passos de 5%)
         val defaults = com.example.model.RecordingSettings()
         assertEquals(120, defaults.floatingBubbleSizePercent)
         assertEquals(120, defaults.dexMiniBarSizePercent)
         assertEquals(90, defaults.dexMiniBarOpacityPercent)
 
         assertEquals(80, com.example.model.SettingsPreferences.sanitizeSizePercent(50))
-        assertEquals(180, com.example.model.SettingsPreferences.sanitizeSizePercent(250))
-        assertEquals(125, com.example.model.SettingsPreferences.sanitizeSizePercent(123))
+        assertEquals(300, com.example.model.SettingsPreferences.sanitizeSizePercent(380))
+        assertEquals(130, com.example.model.SettingsPreferences.sanitizeSizePercent(126))
+        assertEquals(260, com.example.model.SettingsPreferences.sanitizeSizePercent(260))
         assertEquals(25, com.example.model.SettingsPreferences.sanitizeMiniBarOpacityPercent(5))
         assertEquals(100, com.example.model.SettingsPreferences.sanitizeMiniBarOpacityPercent(150))
         assertEquals(65, com.example.model.SettingsPreferences.sanitizeMiniBarOpacityPercent(64))
@@ -508,28 +509,35 @@ class ExampleRobolectricTest {
 
         // Persistência + coerceIn ao salvar/recarregar SharedPreferences
         val outOfBounds = defaults.copy(
-            floatingBubbleSizePercent = 240,
+            floatingBubbleSizePercent = 420,
             dexMiniBarSizePercent = 40,
             dexMiniBarOpacityPercent = 10
         )
         com.example.model.SettingsPreferences.save(context, outOfBounds)
         val clampedReload = com.example.model.SettingsPreferences.load(context)
-        assertEquals(180, clampedReload.floatingBubbleSizePercent)
+        assertEquals(300, clampedReload.floatingBubbleSizePercent)
         assertEquals(80, clampedReload.dexMiniBarSizePercent)
         assertEquals(25, clampedReload.dexMiniBarOpacityPercent)
 
         val validCustom = defaults.copy(
-            floatingBubbleSizePercent = 155,
-            dexMiniBarSizePercent = 140,
+            floatingBubbleSizePercent = 280,
+            dexMiniBarSizePercent = 240,
             dexMiniBarOpacityPercent = 75
         )
         com.example.model.SettingsPreferences.save(context, validCustom)
         val validReload = com.example.model.SettingsPreferences.load(context)
-        assertEquals(155, validReload.floatingBubbleSizePercent)
-        assertEquals(140, validReload.dexMiniBarSizePercent)
+        assertEquals(280, validReload.floatingBubbleSizePercent)
+        assertEquals(240, validReload.dexMiniBarSizePercent)
         assertEquals(75, validReload.dexMiniBarOpacityPercent)
 
-        // 2. Redimensionamento proporcional real da FloatingBallView (sem scaleX/scaleY)
+        // 2. Redimensionamento proporcional real da FloatingBallView (sem scaleX/scaleY) em monitor largo DeX
+        val wideDexDisplay = com.example.overlay.OverlayDisplaySnapshot(
+            displayId = 2,
+            density = 1.0f,
+            scaledDensity = 1.0f,
+            widthPixels = 2560,
+            heightPixels = 1440
+        )
         val ball = com.example.overlay.FloatingBallView(
             context = context,
             windowManager = wm,
@@ -537,16 +545,21 @@ class ExampleRobolectricTest {
             onToggleBrush = {},
             onToggleFacecam = {},
             onCloseBall = {},
-            initialSizePercent = 80
+            initialSizePercent = 80,
+            metricsProvider = { wideDexDisplay }
         )
         val widthAt80 = ball.bubbleContainer.layoutParams.width
+        val badgeWidthAt80 = ball.quickCloseBadge.layoutParams.width
         val btnWidthAt80 = ball.btnPauseResume.layoutParams.width
-        ball.applySizePercent(160)
-        val widthAt160 = ball.bubbleContainer.layoutParams.width
-        val btnWidthAt160 = ball.btnPauseResume.layoutParams.width
-        assertEquals(160, ball.currentSizePercent)
-        assertEquals(true, widthAt160 > widthAt80)
-        assertEquals(true, btnWidthAt160 > btnWidthAt80)
+        ball.applySizePercent(300)
+        val widthAt300 = ball.bubbleContainer.layoutParams.width
+        val badgeWidthAt300 = ball.quickCloseBadge.layoutParams.width
+        val btnWidthAt300 = ball.btnPauseResume.layoutParams.width
+        assertEquals(300, ball.currentSizePercent)
+        assertEquals(true, widthAt300 > widthAt80 * 3)
+        assertEquals(true, badgeWidthAt300 > badgeWidthAt80 * 3)
+        assertEquals(true, btnWidthAt300 > btnWidthAt80 * 3)
+        assertEquals(false, ball.isMenuTwoRows)
         assertEquals(1.0f, ball.scaleX, 0.001f)
         assertEquals(1.0f, ball.scaleY, 0.001f)
         assertEquals(android.view.WindowManager.LayoutParams.WRAP_CONTENT, ball.layoutParams.width)
@@ -561,14 +574,16 @@ class ExampleRobolectricTest {
             onStopRecording = {},
             onHideUntilNotificationTap = {},
             initialSizePercent = 80,
-            initialOpacityPercent = 90
+            initialOpacityPercent = 90,
+            metricsProvider = { wideDexDisplay }
         )
         val pillBtnWidthAt80 = miniBar.btnPauseResume.layoutParams.width
-        miniBar.applyStyle(160, 50)
-        val pillBtnWidthAt160 = miniBar.btnPauseResume.layoutParams.width
-        assertEquals(160, miniBar.currentSizePercent)
+        miniBar.applyStyle(300, 50)
+        val pillBtnWidthAt300 = miniBar.btnPauseResume.layoutParams.width
+        assertEquals(300, miniBar.currentSizePercent)
         assertEquals(50, miniBar.currentOpacityPercent)
-        assertEquals(true, pillBtnWidthAt160 > pillBtnWidthAt80)
+        assertEquals(3.0f, miniBar.effectivePillScale, 0.01f)
+        assertEquals(true, pillBtnWidthAt300 > pillBtnWidthAt80 * 3)
         assertEquals(0.50f, miniBar.pillContainer.alpha, 0.001f)
         assertEquals(
             com.example.model.SettingsPreferences.computeEdgeTabAlpha(50),
@@ -587,24 +602,116 @@ class ExampleRobolectricTest {
             onStopRecording = {},
             onDismissMenu = {},
             initialSizePercent = 80,
-            initialOpacityPercent = 100
+            initialOpacityPercent = 100,
+            metricsProvider = { wideDexDisplay }
         )
         val closeWidthAt80 = miniControl.btnCloseMenu.layoutParams.width
         val btnPadAt80 = miniControl.btnPauseResume.paddingLeft
         val timerTextSizeAt80 = miniControl.timerText.textSize
-        miniControl.applyStyle(150, 75)
-        val closeWidthAt150 = miniControl.btnCloseMenu.layoutParams.width
-        val btnPadAt150 = miniControl.btnPauseResume.paddingLeft
-        val timerTextSizeAt150 = miniControl.timerText.textSize
-        assertEquals(150, miniControl.currentSizePercent)
+        miniControl.applyStyle(260, 75)
+        val closeWidthAt260 = miniControl.btnCloseMenu.layoutParams.width
+        val btnPadAt260 = miniControl.btnPauseResume.paddingLeft
+        val timerTextSizeAt260 = miniControl.timerText.textSize
+        assertEquals(260, miniControl.currentSizePercent)
         assertEquals(75, miniControl.currentOpacityPercent)
-        assertEquals(true, closeWidthAt150 > closeWidthAt80)
-        assertEquals(true, btnPadAt150 > btnPadAt80)
-        assertEquals(true, timerTextSizeAt150 > timerTextSizeAt80)
+        assertEquals(true, closeWidthAt260 > closeWidthAt80 * 2)
+        assertEquals(true, btnPadAt260 > btnPadAt80 * 2)
+        assertEquals(true, timerTextSizeAt260 > timerTextSizeAt80 * 2)
         assertEquals(0.75f, miniControl.cardContainer.alpha, 0.001f)
         assertEquals("tnum", miniControl.timerText.fontFeatureSettings)
         assertEquals(1.0f, miniControl.scaleX, 0.001f)
         assertEquals(android.view.WindowManager.LayoutParams.WRAP_CONTENT, miniControl.layoutParams.width)
+    }
+
+    @Test
+    fun `verify real per-display density scaling, 2-row expanded bubble menu wrap, and 94 percent width safety guard at 300 percent`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+
+        // Display externo Samsung DeX (densidade baixa 1.0x) vs Smartphone Galaxy S23 Ultra (densidade alta 3.5x em retrato)
+        val lowDpiDex = com.example.overlay.OverlayDisplaySnapshot(
+            displayId = 2,
+            density = 1.0f,
+            scaledDensity = 1.0f,
+            widthPixels = 1920,
+            heightPixels = 1080
+        )
+        val highDpiPhonePortrait = com.example.overlay.OverlayDisplaySnapshot(
+            displayId = 0,
+            density = 3.5f,
+            scaledDensity = 3.5f,
+            widthPixels = 1440,
+            heightPixels = 3088
+        )
+
+        // 1. Densidade real: em 120%, a bola no smartphone 3.5x deve ter ~3.5x mais pixels reais que no monitor 1.0x
+        val ballOnDex = com.example.overlay.FloatingBallView(
+            context = context,
+            windowManager = wm,
+            onStartRecording = {},
+            onToggleBrush = {},
+            onToggleFacecam = {},
+            onCloseBall = {},
+            initialSizePercent = 120,
+            metricsProvider = { lowDpiDex }
+        )
+        val ballOnPhone = com.example.overlay.FloatingBallView(
+            context = context,
+            windowManager = wm,
+            onStartRecording = {},
+            onToggleBrush = {},
+            onToggleFacecam = {},
+            onCloseBall = {},
+            initialSizePercent = 120,
+            metricsProvider = { highDpiPhonePortrait }
+        )
+        val dexBallPx = ballOnDex.bubbleContainer.layoutParams.width
+        val phoneBallPx = ballOnPhone.bubbleContainer.layoutParams.width
+        assertEquals(true, phoneBallPx >= (dexBallPx * 3))
+
+        // 2. Em 300% no smartphone em retrato, o menu expandido da Bola quebra automaticamente em 2 linhas
+        // mantendo todos os botões visíveis dentro de 94% da largura do display
+        ballOnPhone.updateRecordingState(com.example.model.RecordingStatus.Recording(5000L))
+        ballOnPhone.applySizePercent(300)
+        assertEquals(true, ballOnPhone.isMenuTwoRows)
+        assertEquals(2, ballOnPhone.menuContainer.childCount)
+        assertEquals(3, ballOnPhone.menuRowTop.childCount)
+        assertEquals(true, ballOnPhone.effectiveMenuScale < 3.0f)
+        val estimatedTwoRowMenuPx = highDpiPhonePortrait.scaledDp((3 * 42) + 12, ballOnPhone.effectiveMenuScale)
+        assertEquals(true, estimatedTwoRowMenuPx <= highDpiPhonePortrait.maxAllowedWidthPx + 4)
+
+        // 3. Em 300% no smartphone em retrato, DexMiniBarView e NotificationMiniControlView limitam sua escala efetiva
+        // para nunca ultrapassar 94% da largura real da tela
+        val phoneMiniBar = com.example.overlay.DexMiniBarView(
+            context = context,
+            windowManager = wm,
+            initialCollapseBehavior = com.example.model.MiniBarCollapseBehavior.COLLAPSE_TO_EDGE_TAB,
+            onTogglePauseResume = {},
+            onStopRecording = {},
+            onHideUntilNotificationTap = {},
+            initialSizePercent = 300,
+            initialOpacityPercent = 90,
+            metricsProvider = { highDpiPhonePortrait }
+        )
+        assertEquals(300, phoneMiniBar.currentSizePercent)
+        assertEquals(true, phoneMiniBar.effectivePillScale < 3.0f)
+        val estimatedPillPx = highDpiPhonePortrait.scaledDp(212, phoneMiniBar.effectivePillScale)
+        assertEquals(true, estimatedPillPx <= highDpiPhonePortrait.maxAllowedWidthPx + 4)
+
+        val phoneMiniControl = com.example.overlay.NotificationMiniControlView(
+            context = context,
+            windowManager = wm,
+            onTogglePauseResume = {},
+            onStopRecording = {},
+            onDismissMenu = {},
+            initialSizePercent = 300,
+            initialOpacityPercent = 90,
+            metricsProvider = { highDpiPhonePortrait }
+        )
+        assertEquals(300, phoneMiniControl.currentSizePercent)
+        assertEquals(true, phoneMiniControl.effectivePillScale < 3.0f)
+        val estimatedControlPx = highDpiPhonePortrait.scaledDp(240, phoneMiniControl.effectivePillScale)
+        assertEquals(true, estimatedControlPx <= highDpiPhonePortrait.maxAllowedWidthPx + 4)
     }
 }
 

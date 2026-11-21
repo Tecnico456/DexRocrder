@@ -21,14 +21,13 @@ import com.example.model.RecordingStatus
 import com.example.model.SettingsPreferences
 import com.example.service.ScreenRecordingService
 import kotlin.math.hypot
-import kotlin.math.roundToInt
 
 /**
  * Mini Menu Flutuante Compacto aberto ao tocar no corpo da notificação durante a gravação
  * (quando "Mini Controle ao Tocar na Notificação" está ativado nos Ajustes).
  *
- * Aplica redimensionamento proporcional real em dp/sp (pillScale) e opacidade (dexMiniBarOpacityPercent)
- * sem recortar bordas no WindowManager.
+ * Aplica redimensionamento proporcional real em dp/sp (80% a 300%) usando a densidade real
+ * do display alvo, opacidade configurável e proteção de 94% de largura sem recortar bordas.
  */
 @SuppressLint("ViewConstructor")
 class NotificationMiniControlView(
@@ -38,7 +37,8 @@ class NotificationMiniControlView(
     private val onStopRecording: () -> Unit,
     private val onDismissMenu: () -> Unit,
     initialSizePercent: Int = SettingsPreferences.DEFAULT_MINI_BAR_SIZE_PERCENT,
-    initialOpacityPercent: Int = SettingsPreferences.DEFAULT_MINI_BAR_OPACITY_PERCENT
+    initialOpacityPercent: Int = SettingsPreferences.DEFAULT_MINI_BAR_OPACITY_PERCENT,
+    private val metricsProvider: (() -> OverlayDisplaySnapshot)? = null
 ) : FrameLayout(context) {
 
     var currentSizePercent: Int = SettingsPreferences.sanitizeSizePercent(initialSizePercent)
@@ -47,11 +47,21 @@ class NotificationMiniControlView(
     var currentOpacityPercent: Int = SettingsPreferences.sanitizeMiniBarOpacityPercent(initialOpacityPercent)
         private set
 
-    private val pillScale: Float
+    private val requestedPillScale: Float
         get() = currentSizePercent / 100f
+
+    /**
+     * Escala efetiva aplicada após o limitador de segurança de 94% da largura do display.
+     */
+    var effectivePillScale: Float = requestedPillScale
+        private set
 
     var isPausedState: Boolean = false
         private set
+
+    private fun currentMetrics(): OverlayDisplaySnapshot {
+        return metricsProvider?.invoke() ?: OverlayDisplayMetrics.readMetrics(context, windowManager)
+    }
 
     val layoutParams: WindowManager.LayoutParams = WindowManager.LayoutParams(
         WindowManager.LayoutParams.WRAP_CONTENT,
@@ -62,7 +72,7 @@ class NotificationMiniControlView(
     ).apply {
         gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
         x = 0
-        y = dpToPx(56)
+        y = currentMetrics().dpToPx(56)
     }
 
     val cardContainer = LinearLayout(context)
@@ -93,9 +103,20 @@ class NotificationMiniControlView(
         updateRecordingState(ScreenRecordingService.recordingStatus.value)
     }
 
+    private fun computeEffectiveScale(metrics: OverlayDisplaySnapshot, requested: Float): Float {
+        // Largura base estimada do Mini Controle em 100% (~240dp com botões "Continuar" e "Parar")
+        val naturalWidthPx = metrics.scaledDp(240, requested)
+        val maxAllowedPx = metrics.maxAllowedWidthPx
+        return if (naturalWidthPx > maxAllowedPx) {
+            (requested * (maxAllowedPx.toFloat() / naturalWidthPx.toFloat())).coerceAtLeast(0.55f)
+        } else {
+            requested
+        }
+    }
+
     private fun setupCard() {
         cardContainer.orientation = LinearLayout.VERTICAL
-        cardContainer.elevation = dpToPx(10).toFloat()
+        cardContainer.elevation = currentMetrics().dpToPx(10).toFloat()
 
         headerRow.orientation = LinearLayout.HORIZONTAL
         headerRow.gravity = Gravity.CENTER_VERTICAL
@@ -175,69 +196,73 @@ class NotificationMiniControlView(
     }
 
     /**
-     * TAREFA 3: Redimensionamento proporcional real em dp/sp e opacidade segura no WindowManager.
+     * TAREFA 2 & 3: Redimensionamento proporcional real em dp/sp com densidade real do display alvo,
+     * opacidade configurável e proteção contra estouro acima de 94% da largura da tela.
      */
     fun applyStyle(sizePercent: Int, opacityPercent: Int) {
         currentSizePercent = SettingsPreferences.sanitizeSizePercent(sizePercent)
         currentOpacityPercent = SettingsPreferences.sanitizeMiniBarOpacityPercent(opacityPercent)
 
-        val s = pillScale
+        val metrics = currentMetrics()
+        val s = computeEffectiveScale(metrics, requestedPillScale)
+        effectivePillScale = s
         val userAlpha = currentOpacityPercent / 100f
 
         cardContainer.alpha = userAlpha
+        cardContainer.elevation = metrics.dpToPx(10).toFloat()
         cardContainer.background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = scaledDp(20, s).toFloat()
+            cornerRadius = metrics.scaledDp(20, s).toFloat()
             setColor(0xF2141820.toInt())
-            setStroke(scaledDp(1, s).coerceAtLeast(1), 0x44FFFFFF)
+            setStroke(metrics.scaledDp(1, s).coerceAtLeast(1), 0x44FFFFFF)
         }
         cardContainer.setPadding(
-            scaledDp(14, s),
-            scaledDp(10, s),
-            scaledDp(14, s),
-            scaledDp(12, s)
+            metrics.scaledDp(14, s),
+            metrics.scaledDp(10, s),
+            metrics.scaledDp(14, s),
+            metrics.scaledDp(12, s)
         )
 
         headerRow.layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply {
-            bottomMargin = scaledDp(10, s)
+            bottomMargin = metrics.scaledDp(10, s)
         }
 
-        val dotSize = scaledDp(10, s)
+        val dotSize = metrics.scaledDp(10, s)
         statusDot.layoutParams = LinearLayout.LayoutParams(dotSize, dotSize).apply {
-            marginEnd = scaledDp(8, s)
+            marginEnd = metrics.scaledDp(8, s)
         }
 
-        statusLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f * s)
+        statusLabel.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.scaledSpPx(11f, s))
         statusLabel.layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply {
-            marginEnd = scaledDp(10, s)
+            marginEnd = metrics.scaledDp(10, s)
         }
 
-        timerText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * s)
+        timerText.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.scaledSpPx(15f, s))
         timerText.layoutParams = LinearLayout.LayoutParams(
             0,
             LinearLayout.LayoutParams.WRAP_CONTENT,
             1f
         ).apply {
-            marginEnd = scaledDp(14, s)
+            marginEnd = metrics.scaledDp(14, s)
         }
 
-        val closeSize = scaledDp(28, s)
-        val closePad = scaledDp(6, s)
+        val closeSize = metrics.scaledDp(28, s)
+        val closePad = metrics.scaledDp(6, s)
         btnCloseMenu.layoutParams = LinearLayout.LayoutParams(closeSize, closeSize)
         btnCloseMenu.setPadding(closePad, closePad, closePad, closePad)
 
-        val pillCorner = scaledDp(16, s).toFloat()
-        val pillPadH = scaledDp(14, s)
-        val pillPadV = scaledDp(8, s)
-        val iconSize = scaledDp(16, s)
-        val stopIconSize = scaledDp(15, s)
-        val iconMargin = scaledDp(6, s)
+        val pillCorner = metrics.scaledDp(16, s).toFloat()
+        val pillPadH = metrics.scaledDp(14, s)
+        val pillPadV = metrics.scaledDp(8, s)
+        val iconSize = metrics.scaledDp(16, s)
+        val stopIconSize = metrics.scaledDp(15, s)
+        val iconMargin = metrics.scaledDp(6, s)
 
         btnPauseResume.background = makePillDrawable(0xFF283040.toInt(), pillCorner)
         btnPauseResume.setPadding(pillPadH, pillPadV, pillPadH, pillPadV)
@@ -245,12 +270,12 @@ class NotificationMiniControlView(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply {
-            marginEnd = scaledDp(8, s)
+            marginEnd = metrics.scaledDp(8, s)
         }
         pauseResumeIcon.layoutParams = LinearLayout.LayoutParams(iconSize, iconSize).apply {
             marginEnd = iconMargin
         }
-        pauseResumeLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * s)
+        pauseResumeLabel.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.scaledSpPx(13f, s))
 
         btnStop.background = makePillDrawable(0xFFE50914.toInt(), pillCorner)
         btnStop.setPadding(pillPadH, pillPadV, pillPadH, pillPadV)
@@ -261,7 +286,7 @@ class NotificationMiniControlView(
         stopIcon.layoutParams = LinearLayout.LayoutParams(stopIconSize, stopIconSize).apply {
             marginEnd = iconMargin
         }
-        stopLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * s)
+        stopLabel.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.scaledSpPx(13f, s))
 
         requestLayout()
         clampPositionToScreen()
@@ -269,11 +294,19 @@ class NotificationMiniControlView(
     }
 
     fun clampPositionToScreen() {
-        val metrics = context.resources.displayMetrics
-        val screenW = metrics.widthPixels.coerceAtLeast(dpToPx(320))
-        val screenH = metrics.heightPixels.coerceAtLeast(dpToPx(320))
-        val estWidth = if (width > 0) width else scaledDp(240, pillScale)
-        val estHeight = if (height > 0) height else scaledDp(96, pillScale)
+        val metrics = currentMetrics()
+        val screenW = metrics.widthPixels
+        val screenH = metrics.heightPixels
+        val estWidth = if (width > 0) {
+            width.coerceAtMost(screenW)
+        } else {
+            metrics.scaledDp(240, effectivePillScale).coerceAtMost(metrics.maxAllowedWidthPx)
+        }
+        val estHeight = if (height > 0) {
+            height.coerceAtMost(screenH)
+        } else {
+            metrics.scaledDp(96, effectivePillScale)
+        }
 
         val maxHalfX = ((screenW - estWidth) / 2).coerceAtLeast(0)
         layoutParams.x = layoutParams.x.coerceIn(-maxHalfX, maxHalfX)
@@ -312,8 +345,8 @@ class NotificationMiniControlView(
 
     @SuppressLint("ClickableViewAccessibility")
     private fun setupDrag() {
-        val touchSlop = dpToPx(6)
         cardContainer.setOnTouchListener { _, event ->
+            val touchSlop = currentMetrics().dpToPx(6)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = layoutParams.x
@@ -367,13 +400,5 @@ class NotificationMiniControlView(
             cornerRadius = cornerRadiusPx
             setColor(color)
         }
-    }
-
-    private fun dpToPx(dp: Int): Int {
-        return (dp * context.resources.displayMetrics.density).toInt()
-    }
-
-    private fun scaledDp(baseDp: Int, scale: Float): Int {
-        return (baseDp * scale * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
     }
 }

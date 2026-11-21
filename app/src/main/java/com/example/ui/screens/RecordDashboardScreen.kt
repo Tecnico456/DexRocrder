@@ -803,7 +803,7 @@ private fun FloatingToolsCard(
                             }
                         },
                         valueRange = SettingsPreferences.MIN_SIZE_PERCENT.toFloat()..SettingsPreferences.MAX_SIZE_PERCENT.toFloat(),
-                        steps = 19,
+                        steps = 21,
                         colors = SliderDefaults.colors(thumbColor = RedPrimary, activeTrackColor = RedPrimary),
                         modifier = Modifier.testTag("slider_floating_bubble_size")
                     )

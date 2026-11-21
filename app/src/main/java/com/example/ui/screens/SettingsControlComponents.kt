@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -121,7 +122,7 @@ fun DexMiniBarStyleControls(
                 }
             },
             valueRange = SettingsPreferences.MIN_SIZE_PERCENT.toFloat()..SettingsPreferences.MAX_SIZE_PERCENT.toFloat(),
-            steps = 19,
+            steps = 21,
             colors = SliderDefaults.colors(
                 thumbColor = RedPrimary,
                 activeTrackColor = RedPrimary
@@ -168,6 +169,7 @@ fun DexMiniBarLivePreview(
 ) {
     var previewPaused by remember { mutableStateOf(false) }
     var previewCollapsed by remember { mutableStateOf(false) }
+    val horizontalPreviewScroll = rememberScrollState()
 
     val pillScale = SettingsPreferences.sanitizeSizePercent(sizePercent) / 100f
     val pillAlpha = SettingsPreferences.sanitizeMiniBarOpacityPercent(opacityPercent) / 100f
@@ -214,8 +216,10 @@ fun DexMiniBarLivePreview(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
+                .wrapContentHeight()
                 .defaultMinSize(minHeight = 68.dp)
-                .horizontalScroll(rememberScrollState()),
+                .horizontalScroll(horizontalPreviewScroll)
+                .padding(vertical = 4.dp),
             contentAlignment = if (previewCollapsed) Alignment.CenterStart else Alignment.Center
         ) {
             if (!previewCollapsed) {
@@ -371,6 +375,8 @@ fun DexMiniBarLivePreview(
 
         val hintText = when {
             previewCollapsed -> "Aba lateral recolhida • Toque na aba para expandir a Pílula novamente"
+            horizontalPreviewScroll.maxValue > 0 ->
+                "Deslize para o lado para ver toda a Pílula em $sizePercent% • Toque nos botões para testar"
             collapseBehavior == MiniBarCollapseBehavior.HIDE_UNTIL_NOTIFICATION_TAP ->
                 "Toque em Pausar para testar • Toque em × para visualizar o estilo da aba lateral"
             else -> "Toque em Pausar ou × na prévia para testar o tamanho real dos botões"

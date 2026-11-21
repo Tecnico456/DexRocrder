@@ -169,24 +169,26 @@ object SettingsPreferences {
     const val PREFS_NAME = "dexrecorder_prefs"
 
     const val MIN_SIZE_PERCENT = 80
-    const val MAX_SIZE_PERCENT = 180
+    const val MAX_SIZE_PERCENT = 300
+    const val SIZE_SLIDER_STEP_PERCENT = 10
     const val DEFAULT_BUBBLE_SIZE_PERCENT = 120
     const val DEFAULT_MINI_BAR_SIZE_PERCENT = 120
 
     const val MIN_MINI_BAR_OPACITY_PERCENT = 25
     const val MAX_MINI_BAR_OPACITY_PERCENT = 100
+    const val OPACITY_SLIDER_STEP_PERCENT = 5
     const val DEFAULT_MINI_BAR_OPACITY_PERCENT = 90
     const val SLIDER_STEP_PERCENT = 5
 
     fun sanitizeSizePercent(value: Int): Int {
         val clamped = value.coerceIn(MIN_SIZE_PERCENT, MAX_SIZE_PERCENT)
-        val snapped = ((clamped + SLIDER_STEP_PERCENT / 2) / SLIDER_STEP_PERCENT) * SLIDER_STEP_PERCENT
+        val snapped = ((clamped + SIZE_SLIDER_STEP_PERCENT / 2) / SIZE_SLIDER_STEP_PERCENT) * SIZE_SLIDER_STEP_PERCENT
         return snapped.coerceIn(MIN_SIZE_PERCENT, MAX_SIZE_PERCENT)
     }
 
     fun sanitizeMiniBarOpacityPercent(value: Int): Int {
         val clamped = value.coerceIn(MIN_MINI_BAR_OPACITY_PERCENT, MAX_MINI_BAR_OPACITY_PERCENT)
-        val snapped = ((clamped + SLIDER_STEP_PERCENT / 2) / SLIDER_STEP_PERCENT) * SLIDER_STEP_PERCENT
+        val snapped = ((clamped + OPACITY_SLIDER_STEP_PERCENT / 2) / OPACITY_SLIDER_STEP_PERCENT) * OPACITY_SLIDER_STEP_PERCENT
         return snapped.coerceIn(MIN_MINI_BAR_OPACITY_PERCENT, MAX_MINI_BAR_OPACITY_PERCENT)
     }
 
